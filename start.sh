@@ -19,5 +19,11 @@ if [ -z "$KCP_CLIENT_ID" ]; then
     exit 1
 fi
 
+# Force direct connection — never depend on Clash or any system proxy
+unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy
+
+# Reduce memory fragmentation under high-load / large-request scenarios
+export MALLOC_ARENA_MAX=2
+
 echo "Starting Kimi Code Proxy..."
-exec python3 kimi_code_proxy.py
+exec /opt/homebrew/bin/python3.11 kimi_code_proxy.py

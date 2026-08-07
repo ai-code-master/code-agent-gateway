@@ -729,6 +729,7 @@ class TokenManager:
         self._refreshing = False
         self._refresh_cond = threading.Condition(self._refresh_lock)
         self._data = {}
+        self._mtime = None
         self._device_id = self._load_device_id()
         self._device_info = self._load_device_info()
         self._load()
@@ -755,21 +756,34 @@ class TokenManager:
         try:
             with open(CREDENTIALS_PATH) as f:
                 self._data = json.load(f)
+            self._mtime = os.path.getmtime(CREDENTIALS_PATH)
             remaining = max(0, self._data.get("expires_at", 0) - time.time())
             logger.info(f"Token loaded, remaining {remaining:.0f}s")
         except Exception as e:
             logger.error(f"Load token failed: {e}")
             self._data = {}
 
+    def _maybe_reload(self):
+        """Reload credentials if the file changed on disk (e.g. CLI re-login)."""
+        try:
+            mtime = os.path.getmtime(CREDENTIALS_PATH)
+        except OSError:
+            return
+        if self._mtime is not None and mtime != self._mtime:
+            logger.info("Credentials file changed on disk, reloading")
+            self._load()
+
     def _save(self):
         try:
             with open(CREDENTIALS_PATH, "w") as f:
                 json.dump(self._data, f, indent=2)
+            self._mtime = os.path.getmtime(CREDENTIALS_PATH)
         except Exception as e:
             logger.error(f"Save token failed: {e}")
 
     def get_token(self):
         with self._lock:
+            self._maybe_reload()
             return self._data.get("access_token", "")
 
     def get_headers(self):
@@ -785,6 +799,7 @@ class TokenManager:
 
     def should_refresh(self):
         with self._lock:
+            self._maybe_reload()
             return (self._data.get("expires_at", 0) - time.time()) < REFRESH_THRESHOLD
 
     def refresh(self):
@@ -797,6 +812,7 @@ class TokenManager:
             self._refreshing = True
         try:
             with self._lock:
+                self._maybe_reload()
                 refresh_token = self._data.get("refresh_token", "")
                 if not refresh_token:
                     logger.warning("No refresh_token available")
@@ -942,6 +958,9 @@ def _truncate_messages(body_dict: dict) -> dict:
     Strategy:
     1. Keep system messages intact.
     2. Keep last N user-assistant pairs (configurable via KCP_MAX_HISTORY_PAIRS).
+       When dropping old messages, ensure tool_call_id references remain valid:
+       if a tool message is kept, the assistant message that issued its tool_call
+       must also be kept.
     3. Truncate very long individual assistant messages.
     """
     if not ENABLE_TRUNCATE:
@@ -958,13 +977,43 @@ def _truncate_messages(body_dict: dict) -> dict:
         else:
             conv_msgs.append(msg)
 
+    # Build map: tool_call_id -> index of assistant message that contains it
+    tool_call_assistant_map = {}
+    for idx, msg in enumerate(conv_msgs):
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls", []):
+                if isinstance(tc, dict) and "id" in tc:
+                    tool_call_assistant_map[tc["id"]] = idx
+
     # Keep last N pairs (2 messages per pair)
     keep_count = max(MAX_HISTORY_PAIRS * 2, 4)  # at least 4 messages
     truncated_info = ""
     if len(conv_msgs) > keep_count:
-        drop_count = len(conv_msgs) - keep_count
-        conv_msgs = conv_msgs[-keep_count:]
-        truncated_info = f" (dropped {drop_count} older messages)"
+        start_idx = len(conv_msgs) - keep_count
+        drop_count = start_idx
+
+        # Adjust start_idx backward so that any tool message kept has its
+        # originating assistant message also kept.
+        adjusted = True
+        while adjusted:
+            adjusted = False
+            required_assistants = set()
+            for idx in range(start_idx, len(conv_msgs)):
+                msg = conv_msgs[idx]
+                if isinstance(msg, dict) and msg.get("role") == "tool":
+                    tc_id = msg.get("tool_call_id")
+                    if tc_id and tc_id in tool_call_assistant_map:
+                        ast_idx = tool_call_assistant_map[tc_id]
+                        if ast_idx < start_idx:
+                            required_assistants.add(ast_idx)
+            if required_assistants:
+                start_idx = min(required_assistants)
+                adjusted = True
+
+        drop_count = start_idx
+        conv_msgs = conv_msgs[start_idx:]
+        if drop_count > 0:
+            truncated_info = f" (dropped {drop_count} older messages)"
 
     # Truncate long assistant messages
     trunc_count = 0
@@ -983,12 +1032,19 @@ def _truncate_messages(body_dict: dict) -> dict:
     body_dict["messages"] = system_msgs + conv_msgs
     return body_dict
 
-
 # ==================== Core Request Function ====================
 def _do_kimi_request(method, target_url, body, headers, retries=0):
     parsed = urllib.parse.urlparse(target_url)
     host, path = parsed.netloc, parsed.path + ("?" + parsed.query if parsed.query else "")
-    conn = http.client.HTTPSConnection(host, timeout=UPSTREAM_TIMEOUT)
+    proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if proxy_url:
+        parsed_proxy = urllib.parse.urlparse(proxy_url)
+        proxy_host = parsed_proxy.hostname
+        proxy_port = parsed_proxy.port or 7897
+        conn = http.client.HTTPSConnection(proxy_host, proxy_port, timeout=UPSTREAM_TIMEOUT)
+        conn.set_tunnel(host)
+    else:
+        conn = http.client.HTTPSConnection(host, timeout=UPSTREAM_TIMEOUT)
     try:
         req_headers = dict(headers)
         req_headers["Connection"] = "close"
@@ -1331,7 +1387,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         for header, value in resp_headers:
             hl = header.lower()
-            if hl in ("connection", "transfer-encoding"):
+            if hl in ("connection", "transfer-encoding", "content-length"):
                 continue
             self.send_header(header, value)
         self.send_header("Content-Length", str(len(data)))
@@ -1453,6 +1509,7 @@ def main():
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGHUP, _signal_handler)
 
+    ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((PROXY_HOST, PROXY_PORT), ProxyHandler)
     logger.info("Kimi Code Proxy v3.0 started")
     logger.info(f"  Listen: http://{PROXY_HOST}:{PROXY_PORT}")
