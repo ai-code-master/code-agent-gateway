@@ -18,6 +18,14 @@ MODEL_MAP = {
     "codex-terra": ("gpt-5.6-terra", "medium"),
     "codex-luna": ("gpt-5.6-luna", "low"),
 }
+
+
+def _normalize_model(model_name: str | None) -> str | None:
+    if not model_name:
+        return None
+    if model_name.startswith("custom-local:"):
+        return model_name[len("custom-local:"):]
+    return model_name
 PUBLIC_MODELS = ("codex-spark", "codex-sol", "codex-terra", "codex-luna")
 
 
@@ -49,8 +57,9 @@ class Handler(BaseHTTPRequestHandler):
             cwd = detect_cwd(messages, {k.lower(): v for k, v in self.headers.items()})
             tools = dynamic_tools(body.get("tools"))
             requested_model = body.get("model") or "codex-sol"
+            normalized_model = _normalize_model(requested_model)
             codex_model, default_effort = MODEL_MAP.get(
-                requested_model, ("gpt-5.6-sol", "high")
+                normalized_model, ("gpt-5.6-sol", "high")
             )
             effort = body.get("reasoning_effort") or default_effort
             self._log_meta(body, cwd, tools, codex_model, effort)
