@@ -1,6 +1,11 @@
-# Kimi Code OAuth Proxy
+# Kimi Code + Codex WorkBuddy Proxy
 
 A lightweight local HTTP proxy that bridges **OpenAI-compatible clients** (e.g. [Hermes](https://github.com/nousresearch/hermes)) to the **Kimi Code API**.
+
+The repository also includes a **Codex App Server bridge** for connecting WorkBuddy to a locally authenticated Codex subscription. The two backends run independently:
+
+- Kimi Code: `http://127.0.0.1:8765/v1`
+- Codex for WorkBuddy: `http://127.0.0.1:8766/v1`
 
 Kimi Code uses OAuth2 + Anthropic Messages API format, which most tools don't speak natively. This proxy handles:
 
@@ -101,10 +106,25 @@ launchctl load ~/Library/LaunchAgents/kimi-code-proxy.plist
 launchctl start kimi-code-proxy
 ```
 
+Install the Codex bridge separately:
+
+```bash
+./launchd/install-codex.sh
+```
+
+The Codex bridge uses the current `codex login` session and exposes three model IDs:
+
+- `codex-sol` → `gpt-5.6-sol` with High reasoning by default
+- `codex-terra` → `gpt-5.6-terra` with Medium reasoning by default
+- `codex-luna` → `gpt-5.6-luna` with Low reasoning by default
+
+It translates WorkBuddy Chat Completions requests and tool definitions to the Codex App Server protocol. The bridge listens on localhost only and does not require an OpenAI API key.
+
 ## Health Check
 
 ```bash
 curl http://127.0.0.1:8765/healthz
+curl http://127.0.0.1:8766/healthz
 ```
 
 ## License
