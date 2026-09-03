@@ -20,12 +20,7 @@ def completion(result, model):
 
 
 def stream_chunks(result, model):
-    common = {
-        "id": _id(),
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": model,
-    }
+    common = stream_common(model)
     yield _chunk(common, {"role": "assistant", "content": ""}, None)
     if result.tool_call:
         delta = {"tool_calls": [{"index": 0, **_tool_call(result.tool_call)}]}
@@ -34,6 +29,23 @@ def stream_chunks(result, model):
     else:
         yield _chunk(common, {"content": result.content}, None)
         yield _chunk(common, {}, "stop")
+
+
+def stream_common(model):
+    return {
+        "id": _id(),
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+    }
+
+
+def stream_chunk(common, delta, finish=None):
+    return _chunk(common, delta, finish)
+
+
+def tool_call_delta(call):
+    return {"tool_calls": [{"index": 0, **_tool_call(call)}]}
 
 
 def _tool_call(call):

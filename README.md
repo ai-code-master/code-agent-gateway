@@ -11,7 +11,8 @@ Kimi Code uses OAuth2 + Anthropic Messages API format, which most tools don't sp
 
 - **OAuth token refresh** automatically (no manual token copy-paste)
 - **Protocol translation** — exposes an OpenAI-compatible `/v1/chat/completions` endpoint on `localhost`
-- **Concurrency control** — serializes upstream requests to avoid Kimi API timeouts
+- **Concurrency control** — caps parallel upstream requests and coalesces identical calls
+- **True streaming** — forwards Kimi and Codex output incrementally
 - **Transparent failover** — retries on 502/429/503 with exponential backoff
 
 ## Why?
@@ -44,7 +45,7 @@ cp .env.example .env
 
 ### 2. Get OAuth Credentials
 
-You need a valid Kimi Code OAuth token. The proxy reads it from `~/.kimi/credentials/kimi-code.json` (same format as the official Kimi CLI).
+You need a valid Kimi Code OAuth token. The proxy reads it from `~/.kimi-code/credentials/kimi-code.json` (same format as the official Kimi CLI).
 
 If you already use [Kimi CLI](https://kimi.com), the credentials file usually exists.
 
@@ -57,7 +58,7 @@ If you already use [Kimi CLI](https://kimi.com), the credentials file usually ex
 Or directly:
 
 ```bash
-python3 kimi_code_proxy.py
+/opt/homebrew/bin/python3.11 kimi_code_proxy.py
 ```
 
 The proxy listens on `http://127.0.0.1:8765` by default.
@@ -85,13 +86,13 @@ All settings are via environment variables (or `.env` file):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `KCP_CLIENT_ID` | *(required)* | OAuth client ID |
-| `KCP_CREDENTIALS_PATH` | `~/.kimi/credentials/kimi-code.json` | Path to Kimi OAuth credentials |
-| `KCP_DEVICE_ID_PATH` | `~/.kimi/device_id` | Path to device ID file |
+| `KCP_CREDENTIALS_PATH` | `~/.kimi-code/credentials/kimi-code.json` | Path to Kimi OAuth credentials |
+| `KCP_DEVICE_ID_PATH` | `~/.kimi-code/device_id` | Path to device ID file |
 | `KCP_AUTH_ENDPOINT` | `https://auth.kimi.com/api/oauth/token` | OAuth token endpoint |
 | `KCP_UPSTREAM_BASE` | `https://api.kimi.com/coding` | Kimi Code API base URL |
 | `KCP_HOST` | `127.0.0.1` | Proxy listen host |
 | `KCP_PORT` | `8765` | Proxy listen port |
-| `KCP_MAX_CONCURRENT` | `1` | Max concurrent upstream requests |
+| `KCP_MAX_CONCURRENT` | `30` | Max concurrent upstream requests |
 | `KCP_LOG_DIR` | `~/.hermes/logs` | Log directory |
 | `KCP_DEVICE_NAME` | `KimiProxy` | Override to hide real device name |
 
@@ -112,8 +113,9 @@ Install the Codex bridge separately:
 ./launchd/install-codex.sh
 ```
 
-The Codex bridge uses the current `codex login` session and exposes three model IDs:
+The Codex bridge uses the current `codex login` session and exposes four model IDs:
 
+- `codex-spark` → `gpt-5.3-codex-spark` with High reasoning by default
 - `codex-sol` → `gpt-5.6-sol` with High reasoning by default
 - `codex-terra` → `gpt-5.6-terra` with Medium reasoning by default
 - `codex-luna` → `gpt-5.6-luna` with Low reasoning by default

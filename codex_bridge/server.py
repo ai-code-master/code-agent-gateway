@@ -6,17 +6,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from appserver import AppServerError, run_codex
 from chat import build_prompt, detect_cwd, dynamic_tools
-from responses import completion, stream_chunks
+from responses import completion, stream_chunk, stream_common, tool_call_delta
 
 
 HOST = os.environ.get("CODEX_BRIDGE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CODEX_BRIDGE_PORT", "8766"))
 MODEL_MAP = {
     "codex-local": ("gpt-5.6-sol", "high"),
+    "codex-spark": ("gpt-5.3-codex-spark", "high"),
     "codex-sol": ("gpt-5.6-sol", "high"),
     "codex-terra": ("gpt-5.6-terra", "medium"),
     "codex-luna": ("gpt-5.6-luna", "low"),
 }
+PUBLIC_MODELS = ("codex-spark", "codex-sol", "codex-terra", "codex-luna")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -30,7 +32,7 @@ class Handler(BaseHTTPRequestHandler):
                 "object": "list",
                 "data": [
                     {"id": name, "object": "model", "owned_by": "openai"}
-                    for name in ("codex-sol", "codex-terra", "codex-luna")
+                    for name in PUBLIC_MODELS
                 ],
             })
         self._json(404, {"error": {"message": "Not found"}})
@@ -52,12 +54,15 @@ class Handler(BaseHTTPRequestHandler):
             )
             effort = body.get("reasoning_effort") or default_effort
             self._log_meta(body, cwd, tools, codex_model, effort)
+            if body.get("stream"):
+                return self._stream_request(
+                    build_prompt(messages), cwd, tools, effort,
+                    codex_model, requested_model,
+                )
             result = run_codex(
                 build_prompt(messages), cwd, tools=tools,
                 effort=effort, model=codex_model,
             )
-            if body.get("stream"):
-                return self._stream(result, requested_model)
             self._json(200, completion(result, requested_model))
         except (ValueError, json.JSONDecodeError) as exc:
             self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
@@ -74,16 +79,41 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
 
-    def _stream(self, result, model):
+    def _stream_request(self, prompt, cwd, tools, effort, codex_model, model):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
-        for chunk in stream_chunks(result, model):
-            data = json.dumps(chunk, ensure_ascii=False, separators=(",", ":"))
-            self.wfile.write(f"data: {data}\n\n".encode())
-        self.wfile.write(b"data: [DONE]\n\n")
+        common = stream_common(model)
+        self._write_sse(stream_chunk(common, {"role": "assistant", "content": ""}))
+        try:
+            result = run_codex(
+                prompt, cwd, tools=tools, effort=effort, model=codex_model,
+                on_delta=lambda text: self._write_sse(
+                    stream_chunk(common, {"content": text})
+                ),
+            )
+            if result.tool_call:
+                self._write_sse(stream_chunk(common, tool_call_delta(result.tool_call)))
+                finish = "tool_calls"
+            else:
+                finish = "stop"
+            self._write_sse(stream_chunk(common, {}, finish))
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except AppServerError as exc:
+            self._write_sse({
+                "error": {"message": str(exc), "type": "codex_backend_error"}
+            })
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+
+    def _write_sse(self, payload):
+        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        self.wfile.write(f"data: {data}\n\n".encode())
         self.wfile.flush()
 
     def _json(self, status, payload):

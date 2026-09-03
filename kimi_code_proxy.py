@@ -21,7 +21,8 @@ Changelog v2.8:
 - Admin API for runtime config inspection
 """
 
-import difflib
+from __future__ import annotations
+
 import hashlib
 import http.client
 import json
@@ -42,15 +43,26 @@ def _env(key, default=""):
     return os.environ.get(key, default)
 
 
-def _load_dotenv(path=".env"):
+_DOTENV_KEYS = set()
+
+
+def _load_dotenv(path=".env", override=False):
     try:
+        values = {}
         with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith('#') and '=' in line:
                     k, v = line.split('=', 1)
-                    if k not in os.environ:
-                        os.environ[k] = v.strip()
+                    values[k] = v.strip()
+        if override:
+            for key in _DOTENV_KEYS - values.keys():
+                os.environ.pop(key, None)
+                _DOTENV_KEYS.discard(key)
+        for k, value in values.items():
+            if k in _DOTENV_KEYS or k not in os.environ:
+                os.environ[k] = value
+                _DOTENV_KEYS.add(k)
     except Exception:
         pass
 
@@ -63,7 +75,7 @@ def _reload_config():
     global GRACEFUL_SHUTDOWN_WAIT, DEBUG_BODY, LOG_DIR_MAX_BYTES
 
     _script_dir = os.path.dirname(os.path.abspath(__file__))
-    _load_dotenv(os.path.join(_script_dir, ".env"))
+    _load_dotenv(os.path.join(_script_dir, ".env"), override=True)
 
     MAX_CONCURRENT   = int(_env("KCP_MAX_CONCURRENT", "30"))
     RPM_LIMIT        = int(_env("KCP_RPM_LIMIT", "0"))
@@ -81,12 +93,17 @@ def _reload_config():
 
     global ENABLE_CACHE, CACHE_TTL, CACHE_MAX_ENTRIES
     global ENABLE_TRUNCATE, MAX_HISTORY_PAIRS, MAX_ASSISTANT_CHARS
+    global ENABLE_SINGLE_FLIGHT, SINGLE_FLIGHT_TIMEOUT
+    global ENABLE_SEMANTIC_CACHE
     ENABLE_CACHE     = _env("KCP_ENABLE_CACHE", "1").lower() in ("1", "true", "yes")
     CACHE_TTL        = int(_env("KCP_CACHE_TTL", "300"))
     CACHE_MAX_ENTRIES = int(_env("KCP_CACHE_MAX_ENTRIES", "100"))
     ENABLE_TRUNCATE  = _env("KCP_ENABLE_TRUNCATE", "1").lower() in ("1", "true", "yes")
     MAX_HISTORY_PAIRS = int(_env("KCP_MAX_HISTORY_PAIRS", "10"))
     MAX_ASSISTANT_CHARS = int(_env("KCP_MAX_ASSISTANT_CHARS", "2000"))
+    ENABLE_SINGLE_FLIGHT = _env("KCP_ENABLE_SINGLE_FLIGHT", "1").lower() in ("1", "true", "yes")
+    SINGLE_FLIGHT_TIMEOUT = int(_env("KCP_SINGLE_FLIGHT_TIMEOUT", "30"))
+    ENABLE_SEMANTIC_CACHE = _env("KCP_ENABLE_SEMANTIC_CACHE", "1").lower() in ("1", "true", "yes")
     logger.info("Config reloaded")
 
 
@@ -95,8 +112,8 @@ _script_dir = os.path.dirname(os.path.abspath(__file__))
 _load_dotenv(os.path.join(_script_dir, ".env"))
 
 # Paths
-CREDENTIALS_PATH = _env("KCP_CREDENTIALS_PATH", os.path.expanduser("~/.kimi/credentials/kimi-code.json"))
-DEVICE_ID_PATH   = _env("KCP_DEVICE_ID_PATH",   os.path.expanduser("~/.kimi/device_id"))
+CREDENTIALS_PATH = _env("KCP_CREDENTIALS_PATH", os.path.expanduser("~/.kimi-code/credentials/kimi-code.json"))
+DEVICE_ID_PATH   = _env("KCP_DEVICE_ID_PATH",   os.path.expanduser("~/.kimi-code/device_id"))
 
 # Endpoints
 AUTH_ENDPOINT    = _env("KCP_AUTH_ENDPOINT",    "https://auth.kimi.com/api/oauth/token")
@@ -131,7 +148,6 @@ MAX_ASSISTANT_CHARS = int(_env("KCP_MAX_ASSISTANT_CHARS", "2000"))
 ENABLE_SINGLE_FLIGHT = _env("KCP_ENABLE_SINGLE_FLIGHT", "1").lower() in ("1", "true", "yes")
 SINGLE_FLIGHT_TIMEOUT = int(_env("KCP_SINGLE_FLIGHT_TIMEOUT", "30"))
 ENABLE_SEMANTIC_CACHE = _env("KCP_ENABLE_SEMANTIC_CACHE", "1").lower() in ("1", "true", "yes")
-SEMANTIC_THRESHOLD = float(_env("KCP_SEMANTIC_THRESHOLD", "0.75"))
 
 # Logging
 LOG_DIR          = _env("KCP_LOG_DIR", os.path.expanduser("~/.hermes/logs"))
@@ -402,8 +418,7 @@ model_cache = ModelListCache(ttl=300)
 class ResponseCache:
     """In-memory cache for LLM non-streaming responses.
     
-    Supports exact-match caching and lightweight semantic caching
-    (difflib-based similarity matching on the last user message).
+    Supports exact caching and conservative normalized-equivalence matching.
     """
 
     def __init__(self, ttl: int = 300, max_entries: int = 100):
@@ -446,65 +461,68 @@ class ResponseCache:
                     return content
         return ""
 
-    def get(self, path: str, body_dict: dict) -> tuple[bytes, list] | None:
+    def get(self, path: str, body_dict: dict, count_miss=True) -> tuple[bytes, list] | None:
         key = self._make_key(path, body_dict)
         if not key:
             return None
         with self._lock:
             entry = self._cache.get(key)
             if not entry:
-                self._miss_count += 1
+                if count_miss:
+                    self._miss_count += 1
                 return None
             expires_at, data, headers = entry
             if time.time() > expires_at:
                 del self._cache[key]
                 del self._signatures[key]
-                self._miss_count += 1
+                if count_miss:
+                    self._miss_count += 1
                 return None
             self._hit_count += 1
             return data, headers
 
     def get_semantic(self, path: str, body_dict: dict) -> tuple[bytes, list] | None:
-        """Try exact match first, then semantic match on last user message."""
-        # Exact match
-        result = self.get(path, body_dict)
+        """Match requests differing only by newlines or outer whitespace."""
+        result = self.get(path, body_dict, count_miss=False)
         if result:
             return result
         if not ENABLE_SEMANTIC_CACHE:
+            with self._lock:
+                self._miss_count += 1
             return None
         key = self._make_key(path, body_dict)
         if not key:
             return None
-        query = self._last_user_message(body_dict)
-        if not query or len(query) < 10:
+        signature = self._semantic_signature(body_dict)
+        if not signature:
             return None
-        model = body_dict.get("model", "")
-        temp = body_dict.get("temperature", 1.0)
         with self._lock:
             now = time.time()
-            best_key = None
-            best_ratio = 0.0
             for ck, sig in self._signatures.items():
                 if ck not in self._cache:
                     continue
-                sig_model, sig_msg, sig_temp = sig
-                # Model and temperature must match for semantic hit
-                if sig_model != model or abs(sig_temp - temp) > 0.01:
-                    continue
                 expires_at = self._cache[ck][0]
-                if now > expires_at:
-                    continue
-                if not sig_msg or len(sig_msg) < 10:
-                    continue
-                ratio = difflib.SequenceMatcher(None, query, sig_msg).ratio()
-                if ratio > best_ratio:
-                    best_ratio = ratio
-                    best_key = ck
-            if best_key and best_ratio >= SEMANTIC_THRESHOLD:
-                self._semantic_hit_count += 1
-                self._hit_count += 1
-                return self._cache[best_key][1], self._cache[best_key][2]
+                if now <= expires_at and sig == signature:
+                    self._semantic_hit_count += 1
+                    self._hit_count += 1
+                    return self._cache[ck][1], self._cache[ck][2]
+            self._miss_count += 1
         return None
+
+    def _semantic_signature(self, body_dict: dict):
+        query = self._last_user_message(body_dict)
+        if not query:
+            return None
+        normalized = query.replace("\r\n", "\n").strip()
+        context = json.loads(json.dumps(body_dict, ensure_ascii=False))
+        for message in reversed(context.get("messages", [])):
+            if isinstance(message, dict) and message.get("role") == "user":
+                if not isinstance(message.get("content"), str):
+                    return None
+                message["content"] = "<normalized-user-message>"
+                break
+        raw = json.dumps(context, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(raw.encode()).hexdigest(), normalized
 
     def put(self, path: str, body_dict: dict, data: bytes, headers: list, status: int):
         if status != 200:
@@ -519,11 +537,7 @@ class ResponseCache:
                 del self._signatures[oldest]
             filtered = [(h, v) for h, v in headers if h.lower() == "content-type"]
             self._cache[key] = (time.time() + self._ttl, data, filtered)
-            self._signatures[key] = (
-                body_dict.get("model", ""),
-                self._last_user_message(body_dict),
-                body_dict.get("temperature", 1.0),
-            )
+            self._signatures[key] = self._semantic_signature(body_dict)
 
     def stats(self):
         with self._lock:
@@ -548,6 +562,15 @@ class ResponseCache:
             self._semantic_hit_count = 0
             self._miss_count = 0
 
+    def configure(self, ttl, max_entries):
+        with self._lock:
+            self._ttl = ttl
+            self._max_entries = max_entries
+            while len(self._cache) > max_entries:
+                oldest = min(self._cache, key=lambda k: self._cache[k][0])
+                del self._cache[oldest]
+                self._signatures.pop(oldest, None)
+
 
 response_cache = ResponseCache(ttl=CACHE_TTL, max_entries=CACHE_MAX_ENTRIES)
 
@@ -564,6 +587,11 @@ class SingleFlight:
             return ""
         if method != "POST" or path not in ("/v1/chat/completions", "/chat/completions"):
             return ""
+        try:
+            if json.loads(body).get("stream"):
+                return ""
+        except (AttributeError, json.JSONDecodeError):
+            return ""
         return hashlib.sha256(f"{method}:{path}:".encode() + body).hexdigest()
 
     def do(self, method: str, path: str, body: bytes, callable_fn):
@@ -576,80 +604,28 @@ class SingleFlight:
         with self._lock:
             entry = self._inflight.get(key)
             if entry is None:
-                # We are the leader
-                cond = threading.Condition(self._lock)
-                self._inflight[key] = [cond, None, None, False]
+                entry = {"event": threading.Event(), "result": None, "error": None}
+                self._inflight[key] = entry
                 is_leader = True
             else:
-                # We are a follower; wait on the leader's condition
-                cond = entry[0]
                 is_leader = False
-
         if not is_leader:
-            # Wait for leader to finish
-            with cond:
-                while True:
-                    with self._lock:
-                        entry = self._inflight.get(key)
-                        if entry is None or entry[3]:
-                            break
-                    cond.wait(timeout=SINGLE_FLIGHT_TIMEOUT)
-            with self._lock:
-                entry = self._inflight.get(key)
-            if entry and entry[3]:
-                if entry[2]:
-                    raise entry[2]
-                return entry[1], True
-            # Timeout or race: fall through to leader path
-            with self._lock:
-                if key not in self._inflight:
-                    cond = threading.Condition(self._lock)
-                    self._inflight[key] = [cond, None, None, False]
-                    is_leader = True
-                else:
-                    entry = self._inflight[key]
-                    if entry[3]:
-                        if entry[2]:
-                            raise entry[2]
-                        return entry[1], True
-                    # Still waiting, try one more time
-                    cond = entry[0]
-            if not is_leader:
-                with cond:
-                    cond.wait(timeout=SINGLE_FLIGHT_TIMEOUT)
-                with self._lock:
-                    entry = self._inflight.get(key)
-                if entry and entry[3]:
-                    if entry[2]:
-                        raise entry[2]
-                    return entry[1], True
-                # Give up and do it ourselves
-                is_leader = True
-                with self._lock:
-                    if key in self._inflight:
-                        del self._inflight[key]
-                    cond = threading.Condition(self._lock)
-                    self._inflight[key] = [cond, None, None, False]
-
-        # Leader executes
+            if not entry["event"].wait(timeout=SINGLE_FLIGHT_TIMEOUT):
+                return callable_fn(), False
+            if entry["error"]:
+                raise entry["error"]
+            return entry["result"], True
         try:
             result = callable_fn()
-            with cond:
-                with self._lock:
-                    self._inflight[key][1] = result
-                    self._inflight[key][3] = True
-                cond.notify_all()
+            entry["result"] = result
             return result, False
         except Exception as e:
-            with cond:
-                with self._lock:
-                    self._inflight[key][2] = e
-                    self._inflight[key][3] = True
-                cond.notify_all()
+            entry["error"] = e
             raise
         finally:
+            entry["event"].set()
             with self._lock:
-                if key in self._inflight and self._inflight[key][3]:
+                if self._inflight.get(key) is entry:
                     del self._inflight[key]
 
 
@@ -660,6 +636,8 @@ class UpstreamHealth:
         self._healthy = True
         self._last_check = 0
         self._check_interval = 30
+        self._consecutive_failures = 0
+        self._failure_threshold = 2
 
     def _do_probe(self):
         try:
@@ -678,25 +656,42 @@ class UpstreamHealth:
                     },
                 )
                 resp = conn.getresponse()
-                healthy = resp.status in (200, 401)
+                result = "healthy" if resp.status == 200 else (
+                    "auth_failure" if resp.status == 401 else "failure"
+                )
             finally:
                 conn.close()
-            return healthy
+            return result
         except Exception as e:
             logger.debug(f"Upstream probe failed: {e}")
-            return False
+            return "failure"
 
     def check(self):
         with self._lock:
             if time.time() - self._last_check < self._check_interval:
                 return self._healthy
-        healthy = self._do_probe()
+        result = self._do_probe()
         with self._lock:
+            if result == "healthy":
+                self._consecutive_failures = 0
+                healthy = True
+            elif result == "auth_failure":
+                self._consecutive_failures = self._failure_threshold
+                healthy = False
+            else:
+                self._consecutive_failures += 1
+                healthy = (
+                    self._healthy
+                    if self._consecutive_failures < self._failure_threshold
+                    else False
+                )
             if healthy != self._healthy:
                 if healthy:
                     logger.info("Upstream health probe: healthy")
                 else:
-                    logger.warning("Upstream health probe: UNHEALTHY")
+                    logger.warning(
+                        f"Upstream health probe: UNHEALTHY ({result})"
+                    )
             self._healthy = healthy
             self._last_check = time.time()
         return healthy
@@ -1091,7 +1086,7 @@ def _current_config():
         },
         "semantic_cache": {
             "enabled": ENABLE_SEMANTIC_CACHE,
-            "threshold": SEMANTIC_THRESHOLD,
+            "mode": "normalized_equivalence",
         },
     }
 
@@ -1149,8 +1144,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         if self.path == "/admin/reload":
             _reload_config()
-            global rpm_limiter
+            global rpm_limiter, kimi_semaphore
             rpm_limiter = RPMLimiter(RPM_LIMIT)
+            kimi_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT)
+            response_cache.configure(CACHE_TTL, CACHE_MAX_ENTRIES)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Connection", "close")
@@ -1241,10 +1238,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
             logger.debug(f"[{request_id}] Body enrichment skipped: {e}")
             if DEBUG_BODY and body:
                 logger.debug(f"[{request_id}] Raw body preview: {_safe_body_preview(body)}")
+        is_stream = bool(isinstance(req_json, dict) and req_json.get("stream"))
 
         # --- Response cache check ---
         if method == "POST" and req_json:
-            cached = response_cache.get(path, req_json)
+            cached = response_cache.get_semantic(path, req_json)
             if cached:
                 data, resp_headers = cached
                 self.send_response(200)
@@ -1268,7 +1266,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "User-Agent": "KimiCLI/1.5",
-            "Accept": "application/json",
+            "Accept": "text/event-stream" if is_stream else "application/json",
             "X-Request-Id": request_id,
         }
         headers.update(token_mgr.get_headers())
@@ -1277,9 +1275,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 headers[key] = self.headers[key]
 
         acquired = False
+        request_semaphore = kimi_semaphore
         queue_start = time.time()
         try:
-            acquired = kimi_semaphore.acquire(timeout=QUEUE_TIMEOUT)
+            acquired = request_semaphore.acquire(timeout=QUEUE_TIMEOUT)
             queue_wait = time.time() - queue_start
             if not acquired:
                 latency = time.time() - start_time
@@ -1302,58 +1301,88 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 f"body={body_len}b queue_wait={queue_wait:.2f}s active={_active_requests}/{MAX_CONCURRENT}"
             )
 
-            # Single-flight: coalesce concurrent identical requests
             def _do_request():
-                return _do_kimi_request(method, target_url, body, headers)
-
-            try:
-                (resp, error), coalesced = single_flight.do(method, path, body, _do_request)
-            except Exception as e:
-                resp, error, coalesced = None, e, False
-
-            if resp and resp.status == 401:
+                resp, error = _do_kimi_request(method, target_url, body, headers)
+                if not resp or resp.status != 401:
+                    return resp, error
                 logger.warning(f"[{request_id}] {client_ip} -> 401, refreshing token...")
-                if token_mgr.refresh():
-                    new_token = token_mgr.get_token()
-                    new_headers = {**headers, "Authorization": f"Bearer {new_token}"}
-                    resp, error = _do_kimi_request(method, target_url, body, new_headers)
-                    if resp and resp.status != 401:
-                        logger.info(f"[{request_id}] Retry after refresh OK")
-                    else:
-                        logger.error(f"[{request_id}] Retry after refresh failed")
-                else:
+                resp.close()
+                if hasattr(resp, "_conn"):
+                    resp._conn.close()
+                if not token_mgr.refresh():
                     logger.error(f"[{request_id}] Token refresh failed")
+                    return None, RuntimeError("Token refresh failed")
+                new_headers = {
+                    **headers,
+                    "Authorization": f"Bearer {token_mgr.get_token()}",
+                }
+                retried, retry_error = _do_kimi_request(
+                    method, target_url, body, new_headers
+                )
+                if retried and retried.status != 401:
+                    logger.info(f"[{request_id}] Retry after refresh OK")
+                else:
+                    logger.error(f"[{request_id}] Retry after refresh failed")
+                return retried, retry_error
 
-            if resp:
-                latency = time.time() - start_time
-                status = resp.status
-                # Parse token usage from response
-                tokens = {"input": 0, "output": 0, "total": 0}
+            if is_stream:
+                resp, error = _do_request()
+                if resp:
+                    status = resp.status
+                    resp_len = self._send_stream_response(
+                        status, resp.getheaders(), resp
+                    )
+                    latency = time.time() - start_time
+                    metrics.record_request(latency, status, queue_wait, model_name)
+                    logger.info(
+                        f"[{request_id}] {client_ip} -> {status} (stream) "
+                        f"latency={latency:.2f}s queue={queue_wait:.2f}s "
+                        f"req={body_len}b resp={resp_len}b model={model_name or '-'}"
+                    )
+                    return
+            else:
+                def _buffered_request():
+                    response, request_error = _do_request()
+                    if not response:
+                        return None, [], b"", request_error
+                    try:
+                        return (
+                            response.status,
+                            response.getheaders(),
+                            response.read(),
+                            None,
+                        )
+                    finally:
+                        response.close()
+                        if hasattr(response, "_conn"):
+                            response._conn.close()
+
                 try:
-                    resp_body = resp.read()
-                    resp_len = len(resp_body)
-                    if resp_body:
-                        try:
-                            resp_json = json.loads(resp_body)
-                            usage = resp_json.get("usage", {})
-                            tokens["input"] = usage.get("prompt_tokens", 0)
-                            tokens["output"] = usage.get("completion_tokens", 0)
-                            tokens["total"] = usage.get("total_tokens", 0)
-                        except Exception:
-                            pass
+                    result, coalesced = single_flight.do(
+                        method, path, body, _buffered_request
+                    )
+                    status, resp_headers, resp_body, error = result
                 except Exception as e:
-                    logger.error(f"[{request_id}] Failed to read response body: {e}")
-                    resp_body = b""
-                    resp_len = 0
-                finally:
-                    resp.close()
-                    if hasattr(resp, "_conn"):
-                        resp._conn.close()
+                    status, resp_headers, resp_body, error = None, [], b"", e
+                    coalesced = False
+
+            if not is_stream and status is not None:
+                latency = time.time() - start_time
+                resp_len = len(resp_body)
+                tokens = {"input": 0, "output": 0, "total": 0}
+                if resp_body:
+                    try:
+                        usage = json.loads(resp_body).get("usage", {})
+                        tokens["input"] = usage.get("prompt_tokens", 0)
+                        tokens["output"] = usage.get("completion_tokens", 0)
+                        tokens["total"] = usage.get("total_tokens", 0)
+                    except Exception:
+                        pass
                 if DEBUG_BODY and resp_body:
                     logger.debug(f"[{request_id}] Response body preview: {_safe_body_preview(resp_body)}")
                 # Store successful response in cache
                 if req_json and status == 200:
-                    response_cache.put(path, req_json, resp_body, resp.getheaders(), status)
+                    response_cache.put(path, req_json, resp_body, resp_headers, status)
                 metrics.record_request(latency, status, queue_wait, model_name, tokens)
                 coalesced_tag = " (coalesced)" if coalesced else ""
                 log_level = logger.warning if latency > SLOW_REQUEST_THRESHOLD else logger.info
@@ -1364,7 +1393,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     f"tokens={tokens['input']}+{tokens['output']}={tokens['total']} "
                     f"model={model_name or '-'}"
                 )
-                self._send_response(status, resp.getheaders(), resp_body)
+                self._send_response(status, resp_headers, resp_body)
             else:
                 latency = time.time() - start_time
                 err_type, err_msg = classify_error(error)
@@ -1381,13 +1410,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if acquired:
                 with _active_requests_lock:
                     _active_requests -= 1
-                kimi_semaphore.release()
+                request_semaphore.release()
 
     def _send_response(self, status, resp_headers, data):
         self.send_response(status)
         for header, value in resp_headers:
             hl = header.lower()
-            if hl in ("connection", "transfer-encoding", "content-length"):
+            if hl in (
+                "connection", "transfer-encoding", "content-length",
+                "date", "server", "set-cookie",
+            ):
                 continue
             self.send_header(header, value)
         self.send_header("Content-Length", str(len(data)))
@@ -1401,6 +1433,36 @@ class ProxyHandler(BaseHTTPRequestHandler):
         finally:
             pass  # data already fully read; no conn to close here
 
+    def _send_stream_response(self, status, resp_headers, resp):
+        self.send_response(status)
+        for header, value in resp_headers:
+            if header.lower() in (
+                "connection", "transfer-encoding", "content-length",
+                "date", "server", "set-cookie",
+            ):
+                continue
+            self.send_header(header, value)
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        sent = 0
+        try:
+            while True:
+                chunk = resp.readline()
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+                sent += len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            logger.debug("Client disconnected during streaming response")
+            metrics.record_client_reset()
+        finally:
+            resp.close()
+            if hasattr(resp, "_conn"):
+                resp._conn.close()
+        return sent
+
     def do_GET(self):
         if self.path == "/healthz":
             upstream_ok = upstream_health.is_healthy()
@@ -1408,6 +1470,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Connection", "close")
             self.end_headers()
+            features = [
+                "connection_close", "backoff_retry", "auto_refresh_401",
+                "full_xmsh_headers", "thinking_injection", "metrics",
+                "structured_access_log", "client_reset_guard", "body_size_guard",
+                "upstream_health_probe", "model_list_cache",
+                "dynamic_max_tokens", "hot_reload", "token_tracking",
+                "true_streaming",
+            ]
+            features.extend(name for enabled, name in (
+                (DEBUG_BODY, "debug_body"),
+                (ENABLE_CACHE, "response_cache"),
+                (ENABLE_TRUNCATE, "message_truncation"),
+                (ENABLE_SINGLE_FLIGHT, "single_flight"),
+                (ENABLE_SEMANTIC_CACHE, "semantic_cache"),
+            ) if enabled)
             health = {
                 "status": "ok" if upstream_ok else "degraded",
                 "upstream_healthy": upstream_ok,
@@ -1428,35 +1505,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 },
                 "semantic_cache": {
                     "enabled": ENABLE_SEMANTIC_CACHE,
-                    "threshold": SEMANTIC_THRESHOLD,
+                    "mode": "normalized_equivalence",
                 },
-                "features": [
-                    "connection_close",
-                    "serial_upstream",
-                    "backoff_retry",
-                    "auto_refresh_401",
-                    "full_xmsh_headers",
-                    "thinking_injection",
-                    "error_classification",
-                    "metrics",
-                    "structured_access_log",
-                    "client_reset_guard",
-                    "body_size_guard",
-                    "slow_request_warning",
-                    "model_stats",
-                    "disk_space_guard",
-                    "graceful_shutdown",
-                    "upstream_health_probe",
-                    "debug_body",
-                    "model_list_cache",
-                    "dynamic_max_tokens",
-                    "hot_reload",
-                    "response_cache",
-                    "message_truncation",
-                    "single_flight",
-                    "semantic_cache",
-                    "token_tracking",
-                ],
+                "features": features,
             }
             self.wfile.write(json.dumps(health).encode())
             self.wfile.flush()
@@ -1480,7 +1531,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             }
             snapshot["semantic_cache"] = {
                 "enabled": ENABLE_SEMANTIC_CACHE,
-                "threshold": SEMANTIC_THRESHOLD,
+                "mode": "normalized_equivalence",
             }
             self.wfile.write(json.dumps(snapshot).encode())
             self.wfile.flush()

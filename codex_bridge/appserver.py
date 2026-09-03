@@ -28,7 +28,9 @@ def _send(proc, payload):
     proc.stdin.flush()
 
 
-def run_codex(prompt, cwd, tools=None, effort=None, model=None, timeout=900):
+def run_codex(
+    prompt, cwd, tools=None, effort=None, model=None, timeout=900, on_delta=None
+):
     proc = subprocess.Popen(
         ["codex", "app-server", "--listen", "stdio://"],
         stdin=subprocess.PIPE,
@@ -51,7 +53,7 @@ def run_codex(prompt, cwd, tools=None, effort=None, model=None, timeout=900):
         if effort in {"minimal", "low", "medium", "high", "xhigh", "max"}:
             params["effort"] = effort
         _send(proc, {"method": "turn/start", "id": 2, "params": params})
-        return _await_turn(output, timeout)
+        return _await_turn(output, timeout, on_delta)
     finally:
         proc.terminate()
         try:
@@ -101,10 +103,12 @@ def _start_thread(proc, output, cwd, tools, model, timeout):
     raise AppServerError("thread/start timed out")
 
 
-def _await_turn(output, timeout):
+def _await_turn(output, timeout, on_delta=None):
     deadline = time.monotonic() + timeout
     final_messages = []
     unknown_messages = []
+    phases = {}
+    streamed_ids = set()
     while time.monotonic() < deadline:
         msg = _next(output, deadline)
         if msg.get("id") == 2:
@@ -116,11 +120,26 @@ def _await_turn(output, timeout):
                 "name": params.get("tool"),
                 "arguments": params.get("arguments", {}),
             })
+        if msg.get("method") == "item/started":
+            item = msg.get("params", {}).get("item", {})
+            if item.get("type") == "agentMessage":
+                phases[item.get("id")] = item.get("phase")
+        if msg.get("method") == "item/agentMessage/delta":
+            params = msg.get("params", {})
+            item_id = params.get("itemId")
+            delta = params.get("delta", "")
+            if on_delta and delta and phases.get(item_id) == "final_answer":
+                on_delta(delta)
+                streamed_ids.add(item_id)
         if msg.get("method") == "item/completed":
             item = msg.get("params", {}).get("item", {})
             if item.get("type") == "agentMessage":
                 target = final_messages if item.get("phase") == "final_answer" else unknown_messages
-                target.append(item.get("text", ""))
+                text = item.get("text", "")
+                target.append(text)
+                if on_delta and text and item.get("phase") == "final_answer":
+                    if item.get("id") not in streamed_ids:
+                        on_delta(text)
         if msg.get("method") == "turn/completed":
             turn = msg.get("params", {}).get("turn", {})
             if turn.get("status") == "failed":
