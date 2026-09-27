@@ -90,6 +90,14 @@ class TokenManager:
             remaining = self._data.get("expires_at", 0) - time.time()
             return remaining < self._refresh_threshold()
 
+    def status(self):
+        with self._lock:
+            expires_at = self._data.get("expires_at", 0)
+            return {
+                "token_expires_at": expires_at,
+                "token_remaining": max(0, expires_at - time.time()),
+            }
+
     def refresh(self):
         with self._refresh_lock:
             if self._refreshing:

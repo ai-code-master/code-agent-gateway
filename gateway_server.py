@@ -38,6 +38,7 @@ from gateway.errors import classify_error
 from gateway.limits import RPMLimiter
 from gateway.logging_setup import build_logger, install_exception_hook
 from gateway.metrics import Metrics
+from gateway.http import ResponseMixin, RouteMixin
 from gateway.provider import TokenManager, UpstreamClient, UpstreamHealth
 from gateway.request_body import (
     RequestBodyProcessor,
@@ -292,38 +293,15 @@ def _current_config():
 
 
 # ==================== HTTP Proxy ====================
-class ProxyHandler(BaseHTTPRequestHandler):
+class ProxyHandler(RouteMixin, ResponseMixin, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-
-    # Override to suppress default stderr logging
-    def log_message(self, format, *args):
-        if self.path not in ("/healthz", "/metrics", "/admin/config", "/admin/reload"):
-            logger.info(f"{self.command} {self.path} -> {args[1]}")
-
-    # Catch client disconnects early to avoid stderr spam
-    def handle(self):
-        try:
-            super().handle()
-        except (ConnectionResetError, BrokenPipeError, TimeoutError) as e:
-            client = self.client_address[0] if self.client_address else "unknown"
-            logger.debug(f"Client {client} disconnected early: {type(e).__name__}")
-            metrics.record_client_reset()
-        except Exception as e:
-            client = self.client_address[0] if self.client_address else "unknown"
-            logger.error(f"Unhandled exception for client {client}: {e}", exc_info=True)
-
-    def _client_ip(self):
-        return self.client_address[0] if self.client_address else "unknown"
-
-    def _send_error(self, code, message, extra_headers=None):
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Connection", "close")
-        if extra_headers:
-            for k, v in extra_headers.items():
-                self.send_header(k, v)
-        self.end_headers()
-        self.wfile.write(json.dumps({"error": message}).encode())
+    logger = logger
+    metrics = metrics
+    upstream_health = upstream_health
+    token_manager = token_mgr
+    response_cache = response_cache
+    current_config = staticmethod(_current_config)
+    active_requests = staticmethod(lambda: _active_requests)
 
     def _forward(self, method):
         global _active_requests
@@ -611,137 +589,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 with _active_requests_lock:
                     _active_requests -= 1
                 request_semaphore.release()
-
-    def _send_response(self, status, resp_headers, data):
-        self.send_response(status)
-        for header, value in resp_headers:
-            hl = header.lower()
-            if hl in (
-                "connection", "transfer-encoding", "content-length",
-                "date", "server", "set-cookie",
-            ):
-                continue
-            self.send_header(header, value)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        try:
-            self.wfile.write(data)
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            logger.debug("Client disconnected during response write")
-        finally:
-            pass  # data already fully read; no conn to close here
-
-    def _send_stream_response(self, status, resp_headers, resp):
-        self.send_response(status)
-        for header, value in resp_headers:
-            if header.lower() in (
-                "connection", "transfer-encoding", "content-length",
-                "date", "server", "set-cookie",
-            ):
-                continue
-            self.send_header(header, value)
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        sent = 0
-        try:
-            while True:
-                chunk = resp.readline()
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                self.wfile.flush()
-                sent += len(chunk)
-        except (BrokenPipeError, ConnectionResetError):
-            logger.debug("Client disconnected during streaming response")
-            metrics.record_client_reset()
-        finally:
-            resp.close()
-            if hasattr(resp, "_conn"):
-                resp._conn.close()
-        return sent
-
-    def do_GET(self):
-        if self.path == "/healthz":
-            upstream_ok = upstream_health.is_healthy()
-            self.send_response(200 if upstream_ok else 503)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            features = [
-                "connection_close", "backoff_retry", "auto_refresh_401",
-                "full_xmsh_headers", "thinking_injection", "metrics",
-                "structured_access_log", "client_reset_guard", "body_size_guard",
-                "upstream_health_probe", "model_list_cache",
-                "dynamic_max_tokens", "hot_reload", "token_tracking",
-                "true_streaming",
-            ]
-            features.extend(name for enabled, name in (
-                (DEBUG_BODY, "debug_body"),
-                (ENABLE_CACHE, "response_cache"),
-                (ENABLE_TRUNCATE, "message_truncation"),
-                (ENABLE_SINGLE_FLIGHT, "single_flight"),
-                (ENABLE_SEMANTIC_CACHE, "semantic_cache"),
-            ) if enabled)
-            health = {
-                "status": "ok" if upstream_ok else "degraded",
-                "upstream_healthy": upstream_ok,
-                "version": "3.0",
-                "token_expires_at": token_mgr._data.get("expires_at", 0),
-                "token_remaining": max(0, token_mgr._data.get("expires_at", 0) - time.time()),
-                "concurrent_limit": MAX_CONCURRENT,
-                "concurrent_active": _active_requests,
-                "cache": response_cache.stats(),
-                "truncation": {
-                    "enabled": ENABLE_TRUNCATE,
-                    "max_history_pairs": MAX_HISTORY_PAIRS,
-                    "max_assistant_chars": MAX_ASSISTANT_CHARS,
-                },
-                "single_flight": {
-                    "enabled": ENABLE_SINGLE_FLIGHT,
-                    "timeout": SINGLE_FLIGHT_TIMEOUT,
-                },
-                "semantic_cache": {
-                    "enabled": ENABLE_SEMANTIC_CACHE,
-                    "mode": "normalized_equivalence",
-                },
-                "features": features,
-            }
-            self.wfile.write(json.dumps(health).encode())
-            self.wfile.flush()
-            return
-
-        if self.path == "/metrics":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            snapshot = metrics.snapshot()
-            snapshot["cache"] = response_cache.stats()
-            snapshot["truncation"] = {
-                "enabled": ENABLE_TRUNCATE,
-                "max_history_pairs": MAX_HISTORY_PAIRS,
-                "max_assistant_chars": MAX_ASSISTANT_CHARS,
-            }
-            snapshot["single_flight"] = {
-                "enabled": ENABLE_SINGLE_FLIGHT,
-                "timeout": SINGLE_FLIGHT_TIMEOUT,
-            }
-            snapshot["semantic_cache"] = {
-                "enabled": ENABLE_SEMANTIC_CACHE,
-                "mode": "normalized_equivalence",
-            }
-            self.wfile.write(json.dumps(snapshot).encode())
-            self.wfile.flush()
-            return
-
-        self._forward("GET")
-
-    def do_POST(self):
-        self._forward("POST")
-
 
 def _signal_handler(signum, frame):
     sig_name = signal.Signals(signum).name
