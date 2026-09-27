@@ -58,7 +58,7 @@ If you already use [Kimi CLI](https://kimi.com), the credentials file usually ex
 Or directly:
 
 ```bash
-/opt/homebrew/bin/python3.11 kimi_code_proxy.py
+python3 kimi_code_proxy.py
 ```
 
 The proxy listens on `http://127.0.0.1:8765` by default.
@@ -98,17 +98,30 @@ All settings are via environment variables (or `.env` file):
 | `KCP_PORT` | `8765` | Proxy listen port |
 | `KCP_MAX_CONCURRENT` | `30` | Max concurrent upstream requests |
 | `KCP_LOG_DIR` | `~/.hermes/logs` | Log directory |
-| `KCP_DEVICE_NAME` | `KimiProxy` | Override to hide real device name |
+| `KCP_DEVICE_NAME` | `CodeAgentGateway` | Override to hide real device name |
+
+### Model and executable discovery
+
+The Kimi endpoint keeps the provider's `/v1/models` list. The Codex bridge
+discovers models from the locally installed Codex App Server and exposes them
+as `codex/<model-id>` in addition to the stable aliases above. Discovery is
+best-effort and falls back to the stable aliases when the Codex CLI is not
+available.
+
+To override the Codex executable when it is not on `PATH`, set:
+
+```bash
+export CODEX_BIN=/absolute/path/to/codex
+```
 
 ## Run as macOS Service (launchd)
 
 Copy the provided plist template and update paths:
 
 ```bash
-cp launchd/kimi-code-proxy.plist ~/Library/LaunchAgents/
+./launchd/install.sh
 # Edit the plist to set the correct WorkingDirectory and ProgramArguments
-launchctl load ~/Library/LaunchAgents/kimi-code-proxy.plist
-launchctl start kimi-code-proxy
+launchctl print gui/$(id -u)/io.github.code-agent-gateway
 ```
 
 Install the Codex bridge separately:
@@ -117,7 +130,8 @@ Install the Codex bridge separately:
 ./launchd/install-codex.sh
 ```
 
-The Codex bridge uses the current `codex login` session and exposes four model IDs:
+The Codex bridge uses the current `codex login` session and exposes stable
+aliases plus any models discovered from the installed Codex CLI:
 
 - `codex-spark` → `gpt-5.3-codex-spark` with High reasoning by default
 - `codex-sol` → `gpt-5.6-sol` with High reasoning by default

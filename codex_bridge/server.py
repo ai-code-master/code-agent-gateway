@@ -44,7 +44,7 @@ def _models():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "WorkBuddyCodexBridge/0.2"
+    server_version = "CodeAgentGateway-Codex/0.3"
 
     def do_GET(self):
         if self.path.rstrip("/") == "/healthz":
@@ -161,5 +161,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"WorkBuddy Codex Bridge listening on http://{HOST}:{PORT}")
+    print(f"Code Agent Gateway Codex bridge listening on http://{HOST}:{PORT}")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

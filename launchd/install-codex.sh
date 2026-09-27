@@ -8,7 +8,7 @@ PLIST_DST="$HOME/Library/LaunchAgents/io.github.codex-workbuddy-bridge.plist"
 PYTHON3_PATH="$(which python3)"
 
 mkdir -p "$HOME/.workbuddy/logs"
-sed -e "s|/ABSOLUTE/PATH/TO/kimi-code-proxy|$PROJECT_DIR|g" \
+sed -e "s|/ABSOLUTE/PATH/TO/code-agent-gateway|$PROJECT_DIR|g" \
     -e "s|/PATH/TO/python3|$PYTHON3_PATH|g" \
     -e "s|/Users/YOUR_USERNAME|$HOME|g" \
     "$PLIST_SRC" > "$PLIST_DST"

@@ -157,7 +157,7 @@ LOG_BACKUP_COUNT = int(_env("KCP_LOG_BACKUP_COUNT", "3"))
 LOG_DIR_MAX_BYTES = int(_env("KCP_LOG_DIR_MAX_BYTES", str(500 * 1024 * 1024)))
 
 # Device info (override to avoid leaking real machine names)
-DEVICE_NAME      = _env("KCP_DEVICE_NAME",      "KimiProxy")
+DEVICE_NAME      = _env("KCP_DEVICE_NAME",      "CodeAgentGateway")
 DEVICE_MODEL     = _env("KCP_DEVICE_MODEL",     "Desktop")
 DEVICE_PLATFORM  = _env("KCP_DEVICE_PLATFORM",  "macOS")
 DEVICE_VERSION   = _env("KCP_DEVICE_VERSION",   "2.1.153")
@@ -1562,7 +1562,7 @@ def main():
 
     ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((PROXY_HOST, PROXY_PORT), ProxyHandler)
-    logger.info("Kimi Code Proxy v3.0 started")
+    logger.info("Code Agent Gateway v3.0 started")
     logger.info(f"  Listen: http://{PROXY_HOST}:{PROXY_PORT}")
     logger.info(f"  Upstream: {UPSTREAM_BASE}")
     logger.info(f"  Concurrent: {MAX_CONCURRENT}, RPM limit: {RPM_LIMIT}, Upstream timeout: {UPSTREAM_TIMEOUT}s, Queue timeout: {QUEUE_TIMEOUT}s")

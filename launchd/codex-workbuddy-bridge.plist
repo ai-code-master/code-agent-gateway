@@ -7,10 +7,10 @@
   <key>ProgramArguments</key>
   <array>
     <string>/PATH/TO/python3</string>
-    <string>/ABSOLUTE/PATH/TO/kimi-code-proxy/codex_bridge/server.py</string>
+    <string>/ABSOLUTE/PATH/TO/code-agent-gateway/codex_bridge/server.py</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/ABSOLUTE/PATH/TO/kimi-code-proxy/codex_bridge</string>
+  <string>/ABSOLUTE/PATH/TO/code-agent-gateway/codex_bridge</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>

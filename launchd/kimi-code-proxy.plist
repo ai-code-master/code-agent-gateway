@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>io.github.YOUR_USERNAME.kimi-code-proxy</string>
+    <string>io.github.YOUR_USERNAME.code-agent-gateway</string>
 
     <key>ProgramArguments</key>
     <array>
@@ -12,7 +12,7 @@
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/ABSOLUTE/PATH/TO/kimi-code-proxy</string>
+    <string>/ABSOLUTE/PATH/TO/code-agent-gateway</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -27,8 +27,8 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/tmp/kimi-code-proxy.log</string>
+    <string>/tmp/code-agent-gateway.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/kimi-code-proxy.log</string>
+    <string>/tmp/code-agent-gateway.log</string>
 </dict>
 </plist>

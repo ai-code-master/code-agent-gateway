@@ -32,8 +32,12 @@ def discover(timeout=8):
             'capabilities': {},
         }})
         send({'method': 'initialized', 'params': {}})
-        send({'method': 'model/list', 'id': 2, 'params': {'includeHidden': False}})
+        request_id = 2
+        cursor = None
+        send({'method': 'model/list', 'id': request_id,
+              'params': {'includeHidden': False}})
         deadline = time.monotonic() + timeout
+        models = []
         while time.monotonic() < deadline:
             try:
                 line = output.get(timeout=max(0.1, deadline - time.monotonic()))
@@ -45,10 +49,17 @@ def discover(timeout=8):
                 message = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if message.get('id') == 2:
+            if message.get('id') == request_id:
                 data = message.get('result', {}).get('data', [])
-                return [item['id'] for item in data if isinstance(item, dict) and item.get('id')]
-        return []
+                models.extend(item['id'] for item in data
+                              if isinstance(item, dict) and item.get('id'))
+                cursor = message.get('result', {}).get('nextCursor')
+                if not cursor:
+                    return list(dict.fromkeys(models))
+                request_id += 1
+                send({'method': 'model/list', 'id': request_id,
+                      'params': {'includeHidden': False, 'cursor': cursor}})
+        return list(dict.fromkeys(models))
     finally:
         proc.terminate()
         try:
