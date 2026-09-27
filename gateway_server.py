@@ -23,7 +23,6 @@ Changelog v2.8:
 
 from __future__ import annotations
 
-import hashlib
 import http.client
 import json
 import logging
@@ -39,6 +38,8 @@ import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 from gateway.config import GatewayConfig
+from gateway.cache import ModelListCache, ResponseCache, SingleFlight
+from gateway.limits import RPMLimiter
 from gateway.metrics import Metrics
 
 # ==================== Configuration ====================
@@ -258,35 +259,6 @@ sys.excepthook = _log_uncaught
 
 metrics = Metrics(SLOW_REQUEST_THRESHOLD)
 
-# ==================== RPM Limiter ====================
-class RPMLimiter:
-    """Simple sliding-window RPM limiter."""
-
-    def __init__(self, max_rpm: int):
-        self._max_rpm = max_rpm
-        self._lock = threading.Lock()
-        self._timestamps = []
-
-    def allow(self) -> bool:
-        if self._max_rpm <= 0:
-            return True
-        now = time.time()
-        window_start = now - 60
-        with self._lock:
-            self._timestamps = [t for t in self._timestamps if t > window_start]
-            if len(self._timestamps) >= self._max_rpm:
-                return False
-            self._timestamps.append(now)
-            return True
-
-    def current(self) -> int:
-        now = time.time()
-        window_start = now - 60
-        with self._lock:
-            self._timestamps = [t for t in self._timestamps if t > window_start]
-            return len(self._timestamps)
-
-
 rpm_limiter = RPMLimiter(RPM_LIMIT)
 
 # ==================== Concurrency Control ====================
@@ -295,265 +267,17 @@ _active_requests_lock = threading.Lock()
 _active_requests = 0
 _shutdown_event = threading.Event()
 
-# ==================== Model List Cache ====================
-class ModelListCache:
-    """Cache upstream /v1/models to avoid repeated queries."""
-
-    def __init__(self, ttl: int = 300):
-        self._ttl = ttl
-        self._lock = threading.Lock()
-        self._data = None
-        self._expires_at = 0
-
-    def get(self, token: str) -> bytes | None:
-        with self._lock:
-            if self._data and time.time() < self._expires_at:
-                return self._data
-        # Cache miss or expired — fetch from upstream
-        try:
-            parsed = urllib.parse.urlparse(UPSTREAM_BASE)
-            conn = http.client.HTTPSConnection(parsed.netloc, timeout=10)
-            try:
-                conn.request(
-                    "GET",
-                    f"{parsed.path}/v1/models",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "User-Agent": "KimiCLI/1.5",
-                    },
-                )
-                resp = conn.getresponse()
-                data = resp.read()
-                if resp.status == 200:
-                    with self._lock:
-                        self._data = data
-                        self._expires_at = time.time() + self._ttl
-                    return data
-            finally:
-                conn.close()
-        except Exception as e:
-            logger.debug(f"Model list fetch failed: {e}")
-        return None
-
-
-model_cache = ModelListCache(ttl=300)
-
-# ==================== Response Cache (chat completions) ====================
-class ResponseCache:
-    """In-memory cache for LLM non-streaming responses.
-    
-    Supports exact caching and conservative normalized-equivalence matching.
-    """
-
-    def __init__(self, ttl: int = 300, max_entries: int = 100):
-        self._ttl = ttl
-        self._max_entries = max_entries
-        self._lock = threading.Lock()
-        self._cache = {}       # key -> (expires_at, data_bytes, headers_list)
-        self._signatures = {}  # key -> (model, last_user_msg, temperature)
-        self._hit_count = 0
-        self._miss_count = 0
-        self._semantic_hit_count = 0
-
-    def _make_key(self, path: str, body_dict: dict) -> str:
-        """Create cache key; return '' if request should not be cached."""
-        if not ENABLE_CACHE:
-            return ""
-        if path not in ("/v1/chat/completions", "/chat/completions"):
-            return ""
-        if body_dict.get("stream"):
-            return ""
-        if body_dict.get("tools") or body_dict.get("tool_choice"):
-            return ""
-        cacheable = {"model", "messages", "temperature", "top_p",
-                     "max_tokens", "presence_penalty", "frequency_penalty",
-                     "response_format", "thinking", "reasoning_effort"}
-        payload = {k: body_dict.get(k) for k in cacheable if k in body_dict}
-        if payload.get("temperature") == 1.0:
-            del payload["temperature"]
-        raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-    def _last_user_message(self, body_dict: dict) -> str:
-        messages = body_dict.get("messages", [])
-        if not isinstance(messages, list):
-            return ""
-        for msg in reversed(messages):
-            if isinstance(msg, dict) and msg.get("role") == "user":
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    return content
-        return ""
-
-    def get(self, path: str, body_dict: dict, count_miss=True) -> tuple[bytes, list] | None:
-        key = self._make_key(path, body_dict)
-        if not key:
-            return None
-        with self._lock:
-            entry = self._cache.get(key)
-            if not entry:
-                if count_miss:
-                    self._miss_count += 1
-                return None
-            expires_at, data, headers = entry
-            if time.time() > expires_at:
-                del self._cache[key]
-                del self._signatures[key]
-                if count_miss:
-                    self._miss_count += 1
-                return None
-            self._hit_count += 1
-            return data, headers
-
-    def get_semantic(self, path: str, body_dict: dict) -> tuple[bytes, list] | None:
-        """Match requests differing only by newlines or outer whitespace."""
-        result = self.get(path, body_dict, count_miss=False)
-        if result:
-            return result
-        if not ENABLE_SEMANTIC_CACHE:
-            with self._lock:
-                self._miss_count += 1
-            return None
-        key = self._make_key(path, body_dict)
-        if not key:
-            return None
-        signature = self._semantic_signature(body_dict)
-        if not signature:
-            return None
-        with self._lock:
-            now = time.time()
-            for ck, sig in self._signatures.items():
-                if ck not in self._cache:
-                    continue
-                expires_at = self._cache[ck][0]
-                if now <= expires_at and sig == signature:
-                    self._semantic_hit_count += 1
-                    self._hit_count += 1
-                    return self._cache[ck][1], self._cache[ck][2]
-            self._miss_count += 1
-        return None
-
-    def _semantic_signature(self, body_dict: dict):
-        query = self._last_user_message(body_dict)
-        if not query:
-            return None
-        normalized = query.replace("\r\n", "\n").strip()
-        context = json.loads(json.dumps(body_dict, ensure_ascii=False))
-        for message in reversed(context.get("messages", [])):
-            if isinstance(message, dict) and message.get("role") == "user":
-                if not isinstance(message.get("content"), str):
-                    return None
-                message["content"] = "<normalized-user-message>"
-                break
-        raw = json.dumps(context, sort_keys=True, ensure_ascii=False)
-        return hashlib.sha256(raw.encode()).hexdigest(), normalized
-
-    def put(self, path: str, body_dict: dict, data: bytes, headers: list, status: int):
-        if status != 200:
-            return
-        key = self._make_key(path, body_dict)
-        if not key:
-            return
-        with self._lock:
-            if len(self._cache) >= self._max_entries:
-                oldest = min(self._cache.keys(), key=lambda k: self._cache[k][0])
-                del self._cache[oldest]
-                del self._signatures[oldest]
-            filtered = [(h, v) for h, v in headers if h.lower() == "content-type"]
-            self._cache[key] = (time.time() + self._ttl, data, filtered)
-            self._signatures[key] = self._semantic_signature(body_dict)
-
-    def stats(self):
-        with self._lock:
-            total = self._hit_count + self._miss_count
-            return {
-                "enabled": ENABLE_CACHE,
-                "semantic_enabled": ENABLE_SEMANTIC_CACHE,
-                "entries": len(self._cache),
-                "ttl": self._ttl,
-                "max_entries": self._max_entries,
-                "hit_count": self._hit_count,
-                "semantic_hits": self._semantic_hit_count,
-                "miss_count": self._miss_count,
-                "hit_rate": round(self._hit_count / total, 4) if total else 0.0,
-            }
-
-    def clear(self):
-        with self._lock:
-            self._cache.clear()
-            self._signatures.clear()
-            self._hit_count = 0
-            self._semantic_hit_count = 0
-            self._miss_count = 0
-
-    def configure(self, ttl, max_entries):
-        with self._lock:
-            self._ttl = ttl
-            self._max_entries = max_entries
-            while len(self._cache) > max_entries:
-                oldest = min(self._cache, key=lambda k: self._cache[k][0])
-                del self._cache[oldest]
-                self._signatures.pop(oldest, None)
-
-
-response_cache = ResponseCache(ttl=CACHE_TTL, max_entries=CACHE_MAX_ENTRIES)
-
-# ==================== Single-Flight Request Coalescing ====================
-class SingleFlight:
-    """Coalesce concurrent identical requests into a single upstream call."""
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._inflight = {}  # key -> (condition, result, error, done)
-
-    def _make_key(self, method: str, path: str, body: bytes) -> str:
-        if not ENABLE_SINGLE_FLIGHT:
-            return ""
-        if method != "POST" or path not in ("/v1/chat/completions", "/chat/completions"):
-            return ""
-        try:
-            if json.loads(body).get("stream"):
-                return ""
-        except (AttributeError, json.JSONDecodeError):
-            return ""
-        return hashlib.sha256(f"{method}:{path}:".encode() + body).hexdigest()
-
-    def do(self, method: str, path: str, body: bytes, callable_fn):
-        """Execute callable_fn, coalescing with concurrent identical requests.
-        Returns (result, is_coalesced)."""
-        key = self._make_key(method, path, body)
-        if not key:
-            return callable_fn(), False
-
-        with self._lock:
-            entry = self._inflight.get(key)
-            if entry is None:
-                entry = {"event": threading.Event(), "result": None, "error": None}
-                self._inflight[key] = entry
-                is_leader = True
-            else:
-                is_leader = False
-        if not is_leader:
-            if not entry["event"].wait(timeout=SINGLE_FLIGHT_TIMEOUT):
-                return callable_fn(), False
-            if entry["error"]:
-                raise entry["error"]
-            return entry["result"], True
-        try:
-            result = callable_fn()
-            entry["result"] = result
-            return result, False
-        except Exception as e:
-            entry["error"] = e
-            raise
-        finally:
-            entry["event"].set()
-            with self._lock:
-                if self._inflight.get(key) is entry:
-                    del self._inflight[key]
-
-
-single_flight = SingleFlight()
+model_cache = ModelListCache(UPSTREAM_BASE, logger, ttl=300)
+response_cache = ResponseCache(
+    ttl=CACHE_TTL,
+    max_entries=CACHE_MAX_ENTRIES,
+    enabled=lambda: ENABLE_CACHE,
+    semantic_enabled=lambda: ENABLE_SEMANTIC_CACHE,
+)
+single_flight = SingleFlight(
+    enabled=lambda: ENABLE_SINGLE_FLIGHT,
+    timeout=lambda: SINGLE_FLIGHT_TIMEOUT,
+)
 class UpstreamHealth:
     def __init__(self):
         self._lock = threading.Lock()
