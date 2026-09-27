@@ -2,9 +2,11 @@
 import json
 import os
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from appserver import AppServerError, run_codex
+from catalog import discover
 from chat import build_prompt, detect_cwd, dynamic_tools
 from responses import completion, stream_chunk, stream_common, tool_call_delta
 
@@ -27,6 +29,18 @@ def _normalize_model(model_name: str | None) -> str | None:
         return model_name[len("custom-local:"):]
     return model_name
 PUBLIC_MODELS = ("codex-spark", "codex-sol", "codex-terra", "codex-luna")
+_DISCOVERED = (0.0, ())
+
+
+def _models():
+    global _DISCOVERED
+    if time.time() - _DISCOVERED[0] > 60:
+        try:
+            _DISCOVERED = (time.time(), tuple(discover()))
+        except Exception as error:
+            print(f'model discovery skipped: {error}', file=sys.stderr)
+            _DISCOVERED = (time.time(), ())
+    return tuple(dict.fromkeys(PUBLIC_MODELS + tuple('codex/' + item for item in _DISCOVERED[1])))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -40,7 +54,7 @@ class Handler(BaseHTTPRequestHandler):
                 "object": "list",
                 "data": [
                     {"id": name, "object": "model", "owned_by": "openai"}
-                    for name in PUBLIC_MODELS
+                    for name in _models()
                 ],
             })
         self._json(404, {"error": {"message": "Not found"}})
@@ -58,9 +72,9 @@ class Handler(BaseHTTPRequestHandler):
             tools = dynamic_tools(body.get("tools"))
             requested_model = body.get("model") or "codex-sol"
             normalized_model = _normalize_model(requested_model)
-            codex_model, default_effort = MODEL_MAP.get(
-                normalized_model, ("gpt-5.6-sol", "high")
-            )
+            codex_model, default_effort = MODEL_MAP.get(normalized_model, (None, "high"))
+            if codex_model is None:
+                codex_model = normalized_model.removeprefix('codex/') or 'gpt-5.6-sol'
             effort = body.get("reasoning_effort") or default_effort
             self._log_meta(body, cwd, tools, codex_model, effort)
             if body.get("stream"):

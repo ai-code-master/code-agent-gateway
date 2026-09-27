@@ -5,6 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
+from paths import codex
 
 
 @dataclass
@@ -32,7 +33,7 @@ def run_codex(
     prompt, cwd, tools=None, effort=None, model=None, timeout=900, on_delta=None
 ):
     proc = subprocess.Popen(
-        ["codex", "app-server", "--listen", "stdio://"],
+        [codex(), "app-server", "--listen", "stdio://"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
