@@ -23,14 +23,12 @@ Changelog v2.8:
 
 from __future__ import annotations
 
-import http.client
 import json
 import os
 import signal
 import sys
 import threading
 import time
-import urllib.parse
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
@@ -40,6 +38,7 @@ from gateway.errors import classify_error
 from gateway.limits import RPMLimiter
 from gateway.logging_setup import build_logger, install_exception_hook
 from gateway.metrics import Metrics
+from gateway.provider import TokenManager, UpstreamClient, UpstreamHealth
 from gateway.request_body import (
     RequestBodyProcessor,
     dynamic_max_tokens as _dynamic_max_tokens,
@@ -205,82 +204,6 @@ single_flight = SingleFlight(
     enabled=lambda: ENABLE_SINGLE_FLIGHT,
     timeout=lambda: SINGLE_FLIGHT_TIMEOUT,
 )
-class UpstreamHealth:
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._healthy = True
-        self._last_check = 0
-        self._check_interval = 30
-        self._consecutive_failures = 0
-        self._failure_threshold = 2
-
-    def _do_probe(self):
-        try:
-            token = token_mgr.get_token()
-            if not token:
-                return False
-            parsed = urllib.parse.urlparse(UPSTREAM_BASE)
-            conn = http.client.HTTPSConnection(parsed.netloc, timeout=5)
-            try:
-                conn.request(
-                    "GET",
-                    f"{parsed.path}/v1/models",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "User-Agent": "KimiCLI/1.5",
-                    },
-                )
-                resp = conn.getresponse()
-                result = "healthy" if resp.status == 200 else (
-                    "auth_failure" if resp.status == 401 else "failure"
-                )
-            finally:
-                conn.close()
-            return result
-        except Exception as e:
-            logger.debug(f"Upstream probe failed: {e}")
-            return "failure"
-
-    def check(self):
-        with self._lock:
-            if time.time() - self._last_check < self._check_interval:
-                return self._healthy
-        result = self._do_probe()
-        with self._lock:
-            if result == "healthy":
-                self._consecutive_failures = 0
-                healthy = True
-            elif result == "auth_failure":
-                self._consecutive_failures = self._failure_threshold
-                healthy = False
-            else:
-                self._consecutive_failures += 1
-                healthy = (
-                    self._healthy
-                    if self._consecutive_failures < self._failure_threshold
-                    else False
-                )
-            if healthy != self._healthy:
-                if healthy:
-                    logger.info("Upstream health probe: healthy")
-                else:
-                    logger.warning(
-                        f"Upstream health probe: UNHEALTHY ({result})"
-                    )
-            self._healthy = healthy
-            self._last_check = time.time()
-        return healthy
-
-    def is_healthy(self):
-        with self._lock:
-            if time.time() - self._last_check > self._check_interval * 3:
-                return False
-            return self._healthy
-
-
-upstream_health = UpstreamHealth()
-
-
 def _upstream_probe_worker():
     check_interval = upstream_health._check_interval
     while not _shutdown_event.is_set():
@@ -291,146 +214,22 @@ def _upstream_probe_worker():
             time.sleep(1)
 
 
-# ==================== Token Management ====================
-class TokenManager:
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._refresh_lock = threading.Lock()
-        self._refreshing = False
-        self._refresh_cond = threading.Condition(self._refresh_lock)
-        self._data = {}
-        self._mtime = None
-        self._device_id = self._load_device_id()
-        self._device_info = self._load_device_info()
-        self._load()
-
-    def _load_device_id(self):
-        try:
-            with open(DEVICE_ID_PATH) as f:
-                return f.read().strip()
-        except Exception:
-            return "unknown"
-
-    def _load_device_info(self):
-        import platform
-        return {
-            "platform": DEVICE_PLATFORM,
-            "version": DEVICE_VERSION,
-            "device_name": DEVICE_NAME,
-            "device_model": DEVICE_MODEL,
-            "os_version": platform.mac_ver()[0] or _env("KCP_OS_VERSION", "15.0"),
-            "device_id": self._device_id,
-        }
-
-    def _load(self):
-        try:
-            with open(CREDENTIALS_PATH) as f:
-                self._data = json.load(f)
-            self._mtime = os.path.getmtime(CREDENTIALS_PATH)
-            remaining = max(0, self._data.get("expires_at", 0) - time.time())
-            logger.info(f"Token loaded, remaining {remaining:.0f}s")
-        except Exception as e:
-            logger.error(f"Load token failed: {e}")
-            self._data = {}
-
-    def _maybe_reload(self):
-        """Reload credentials if the file changed on disk (e.g. CLI re-login)."""
-        try:
-            mtime = os.path.getmtime(CREDENTIALS_PATH)
-        except OSError:
-            return
-        if self._mtime is not None and mtime != self._mtime:
-            logger.info("Credentials file changed on disk, reloading")
-            self._load()
-
-    def _save(self):
-        try:
-            with open(CREDENTIALS_PATH, "w") as f:
-                json.dump(self._data, f, indent=2)
-            self._mtime = os.path.getmtime(CREDENTIALS_PATH)
-        except Exception as e:
-            logger.error(f"Save token failed: {e}")
-
-    def get_token(self):
-        with self._lock:
-            self._maybe_reload()
-            return self._data.get("access_token", "")
-
-    def get_headers(self):
-        d = self._device_info
-        return {
-            "X-Msh-Platform": d["platform"],
-            "X-Msh-Version": d["version"],
-            "X-Msh-Device-Name": d["device_name"],
-            "X-Msh-Device-Model": d["device_model"],
-            "X-Msh-Os-Version": d["os_version"],
-            "X-Msh-Device-Id": d["device_id"],
-        }
-
-    def should_refresh(self):
-        with self._lock:
-            self._maybe_reload()
-            return (self._data.get("expires_at", 0) - time.time()) < REFRESH_THRESHOLD
-
-    def refresh(self):
-        with self._refresh_lock:
-            if self._refreshing:
-                logger.info("Waiting for refresh...")
-                self._refresh_cond.wait(timeout=30)
-                with self._lock:
-                    return self._data.get("expires_at", 0) > time.time() + 10
-            self._refreshing = True
-        try:
-            with self._lock:
-                self._maybe_reload()
-                refresh_token = self._data.get("refresh_token", "")
-                if not refresh_token:
-                    logger.warning("No refresh_token available")
-                    return False
-                parsed_auth = urllib.parse.urlparse(AUTH_ENDPOINT)
-                conn = http.client.HTTPSConnection(parsed_auth.netloc, timeout=30)
-                try:
-                    body = urllib.parse.urlencode({
-                        "grant_type": "refresh_token",
-                        "client_id": CLIENT_ID,
-                        "refresh_token": refresh_token,
-                    })
-                    conn.request(
-                        "POST",
-                        parsed_auth.path,
-                        body=body,
-                        headers={"Content-Type": "application/x-www-form-urlencoded"},
-                    )
-                    resp = conn.getresponse()
-                    resp_body = resp.read()
-                    if resp.status != 200:
-                        try:
-                            err_summary = json.loads(resp_body)
-                        except Exception:
-                            err_summary = resp_body.decode("utf-8", errors="replace")[:200]
-                        logger.error(f"Token refresh HTTP {resp.status}: {err_summary}")
-                        return False
-                    new_tokens = json.loads(resp_body)
-                finally:
-                    conn.close()
-                self._data["access_token"] = new_tokens["access_token"]
-                self._data["refresh_token"] = new_tokens["refresh_token"]
-                self._data["token_type"] = new_tokens.get("token_type", "Bearer")
-                self._data["expires_in"] = new_tokens.get("expires_in", 900)
-                self._data["expires_at"] = time.time() + new_tokens.get("expires_in", 900)
-                self._save()
-                logger.info("Token refresh OK")
-                return True
-        except Exception as e:
-            logger.error(f"Token refresh failed: {e}")
-            return False
-        finally:
-            with self._refresh_lock:
-                self._refreshing = False
-                self._refresh_cond.notify_all()
-
-
-token_mgr = TokenManager()
+token_mgr = TokenManager(
+    CREDENTIALS_PATH,
+    DEVICE_ID_PATH,
+    AUTH_ENDPOINT,
+    CLIENT_ID,
+    {
+        "platform": DEVICE_PLATFORM,
+        "version": DEVICE_VERSION,
+        "device_name": DEVICE_NAME,
+        "device_model": DEVICE_MODEL,
+        "os_version": _env("KCP_OS_VERSION", ""),
+    },
+    logger,
+    refresh_threshold=lambda: REFRESH_THRESHOLD,
+)
+upstream_health = UpstreamHealth(token_mgr, UPSTREAM_BASE, logger)
 
 # ==================== Background Threads ====================
 def refresh_worker():
@@ -451,37 +250,14 @@ body_processor = RequestBodyProcessor(
     logger=logger,
 )
 
-# ==================== Core Request Function ====================
-def _do_kimi_request(method, target_url, body, headers, retries=0):
-    parsed = urllib.parse.urlparse(target_url)
-    host, path = parsed.netloc, parsed.path + ("?" + parsed.query if parsed.query else "")
-    proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
-    if proxy_url:
-        parsed_proxy = urllib.parse.urlparse(proxy_url)
-        proxy_host = parsed_proxy.hostname
-        proxy_port = parsed_proxy.port or 7897
-        conn = http.client.HTTPSConnection(proxy_host, proxy_port, timeout=UPSTREAM_TIMEOUT)
-        conn.set_tunnel(host)
-    else:
-        conn = http.client.HTTPSConnection(host, timeout=UPSTREAM_TIMEOUT)
-    try:
-        req_headers = dict(headers)
-        req_headers["Connection"] = "close"
-        conn.request(method, path, body=body, headers=req_headers)
-        resp = conn.getresponse()
-        status = resp.status
-        if status in (502, 429, 503) and retries < MAX_RETRIES:
-            wait = BACKOFF_BASE * (2 ** retries)
-            logger.warning(f"HTTP {status}, retry in {wait:.1f}s (attempt {retries+1})...")
-            metrics.record_retry()
-            time.sleep(wait)
-            conn.close()
-            return _do_kimi_request(method, target_url, body, headers, retries + 1)
-        resp._conn = conn
-        return resp, None
-    except Exception as e:
-        conn.close()
-        return None, e
+upstream_client = UpstreamClient(
+    timeout=lambda: UPSTREAM_TIMEOUT,
+    max_retries=lambda: MAX_RETRIES,
+    backoff_base=lambda: BACKOFF_BASE,
+    logger=logger,
+    metrics=metrics,
+)
+_do_kimi_request = upstream_client.request
 
 
 # ==================== Admin Config ====================
