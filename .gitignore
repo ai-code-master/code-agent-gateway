@@ -21,6 +21,7 @@ logs/
 .vscode/
 *.swp
 *.swo
+*.bak
 
 # Credentials (never commit!)
 *.json

@@ -58,7 +58,7 @@ If you already use [Kimi CLI](https://kimi.com), the credentials file usually ex
 Or directly:
 
 ```bash
-python3 kimi_code_proxy.py
+python3 gateway_server.py
 ```
 
 The proxy listens on `http://127.0.0.1:8765` by default.

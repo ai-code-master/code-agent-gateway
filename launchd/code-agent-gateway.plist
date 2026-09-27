@@ -8,7 +8,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/PATH/TO/python3</string>
-        <string>/ABSOLUTE/PATH/TO/kimi_code_proxy.py</string>
+        <string>/ABSOLUTE/PATH/TO/gateway_server.py</string>
     </array>
 
     <key>WorkingDirectory</key>

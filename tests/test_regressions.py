@@ -16,7 +16,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "codex_bridge"))
 
-import kimi_code_proxy as proxy
+import gateway_server as proxy
 from appserver import _await_turn
 
 

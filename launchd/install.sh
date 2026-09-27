@@ -5,7 +5,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PLIST_SRC="$SCRIPT_DIR/kimi-code-proxy.plist"
+PLIST_SRC="$SCRIPT_DIR/code-agent-gateway.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/io.github.code-agent-gateway.plist"
 
 echo "Installing launchd service..."
@@ -15,15 +15,14 @@ PYTHON3_PATH="$(which python3)"
 
 # Substitute paths
 sed -e "s|/ABSOLUTE/PATH/TO/code-agent-gateway|$PROJECT_DIR|g" \
-    -e "s|/ABSOLUTE/PATH/TO/kimi_code_proxy.py|$PROJECT_DIR/kimi_code_proxy.py|g" \
+    -e "s|/ABSOLUTE/PATH/TO/gateway_server.py|$PROJECT_DIR/gateway_server.py|g" \
     -e "s|/PATH/TO/python3|$PYTHON3_PATH|g" \
     -e "s|/Users/YOUR_USERNAME|$HOME|g" \
     -e "s|io.github.YOUR_USERNAME.code-agent-gateway|io.github.code-agent-gateway|g" \
     "$PLIST_SRC" > "$PLIST_DST"
 
-# Stop any existing manual or launchd instance
+# Stop only the matching launchd service. Manual processes are left untouched.
 launchctl unload "$PLIST_DST" 2>/dev/null || true
-pkill -f "kimi_code_proxy.py" 2>/dev/null || true
 sleep 1
 
 launchctl load "$PLIST_DST"

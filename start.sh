@@ -34,4 +34,4 @@ if [ -z "$PYTHON_BIN" ]; then
     exit 1
 fi
 echo "Starting Code Agent Gateway with $PYTHON_BIN..."
-exec "$PYTHON_BIN" kimi_code_proxy.py
+exec "$PYTHON_BIN" gateway_server.py
