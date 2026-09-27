@@ -41,8 +41,12 @@ class CodexProvider:
 
     def model_records(self):
         discovered = self._discover_models()
+        aliases = tuple(
+            alias for alias in PUBLIC_MODELS
+            if MODEL_MAP[alias][0] in discovered
+        )
         names = tuple(dict.fromkeys(
-            PUBLIC_MODELS + tuple(f"codex/{name}" for name in discovered)
+            aliases + tuple(f"codex/{name}" for name in discovered)
         ))
         return [
             {"id": name, "object": "model", "owned_by": "openai"}

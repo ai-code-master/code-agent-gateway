@@ -118,6 +118,15 @@ class ModelDiscoveryTests(unittest.TestCase):
                     break
                 time.sleep(0.01)
             self.assertTrue(any(x["id"] == "codex/gpt-test" for x in records))
+            self.assertFalse(any(x["id"] == "codex-spark" for x in records))
+
+    def test_aliases_are_limited_to_discovered_models(self):
+        provider = CodexProvider(Mock())
+        provider._models = ("gpt-5.6-luna",)
+        provider._models_at = time.time()
+        names = {item["id"] for item in provider.model_records()}
+        self.assertIn("codex-luna", names)
+        self.assertNotIn("codex-spark", names)
 
 
 class FakeResponse:
