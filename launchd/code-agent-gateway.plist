@@ -18,6 +18,8 @@
     <dict>
         <key>HOME</key>
         <string>/Users/YOUR_USERNAME</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <!-- Load .env automatically since the script reads it -->
     </dict>
 

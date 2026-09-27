@@ -67,6 +67,7 @@ class RouteMixin:
             "structured_access_log", "client_reset_guard", "body_size_guard",
             "upstream_health_probe", "model_list_cache", "dynamic_max_tokens",
             "hot_reload", "token_tracking", "true_streaming",
+            "unified_provider_routing", "codex_app_server",
         ]
         flags = (
             (config["debug_body"], "debug_body"),
