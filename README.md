@@ -67,6 +67,14 @@ The gateway is intentionally localhost-only. Do not change `KCP_HOST` to
 `0.0.0.0` unless you add authentication, TLS, rate limiting, and a trusted
 network boundary yourself.
 
+### Architecture
+
+`gateway_server.py` is a thin compatibility entrypoint. Implementation is
+split by responsibility under `gateway/`: application lifecycle and wiring,
+HTTP handling, provider authentication and transport, caching, metrics,
+logging, rate limiting, and request normalization. Python source files are
+kept below 200 lines so provider integrations can evolve independently.
+
 ### 4. Configure Your Client
 
 Point your client to the proxy:
