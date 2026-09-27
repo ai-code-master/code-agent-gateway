@@ -23,29 +23,24 @@ Changelog v2.8:
 
 from __future__ import annotations
 
-import json
 import os
 import signal
 import sys
 import threading
 import time
-import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 from gateway.config import GatewayConfig
 from gateway.cache import ModelListCache, ResponseCache, SingleFlight
-from gateway.errors import classify_error
 from gateway.limits import RPMLimiter
 from gateway.logging_setup import build_logger, install_exception_hook
 from gateway.metrics import Metrics
-from gateway.http import ResponseMixin, RouteMixin
-from gateway.provider import TokenManager, UpstreamClient, UpstreamHealth
-from gateway.request_body import (
-    RequestBodyProcessor,
-    dynamic_max_tokens as _dynamic_max_tokens,
-    estimate_tokens as _estimate_tokens,
-    safe_body_preview as _safe_body_preview,
+from gateway.http import (
+    ExecutionMixin, ProxyContext, ProxyMixin, ResponseMixin, RouteMixin,
 )
+from gateway.provider import TokenManager, UpstreamClient, UpstreamHealth
+from gateway.request_body import RequestBodyProcessor
+from gateway.runtime import runtime
 
 # ==================== Configuration ====================
 def _env(key, default=""):
@@ -190,9 +185,7 @@ rpm_limiter = RPMLimiter(RPM_LIMIT)
 
 # ==================== Concurrency Control ====================
 kimi_semaphore = threading.Semaphore(MAX_CONCURRENT)
-_active_requests_lock = threading.Lock()
-_active_requests = 0
-_shutdown_event = threading.Event()
+_shutdown_event = runtime.shutdown_event
 
 model_cache = ModelListCache(UPSTREAM_BASE, logger, ttl=300)
 response_cache = ResponseCache(
@@ -264,6 +257,7 @@ _do_kimi_request = upstream_client.request
 # ==================== Admin Config ====================
 def _current_config():
     return {
+        "upstream_base": UPSTREAM_BASE,
         "max_concurrent": MAX_CONCURRENT,
         "rpm_limit": RPM_LIMIT,
         "upstream_timeout": UPSTREAM_TIMEOUT,
@@ -292,8 +286,36 @@ def _current_config():
     }
 
 
+def _reload_http_config():
+    global rpm_limiter, kimi_semaphore
+    _reload_config()
+    rpm_limiter = RPMLimiter(RPM_LIMIT)
+    kimi_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT)
+    response_cache.configure(CACHE_TTL, CACHE_MAX_ENTRIES)
+    return _current_config()
+
+
+proxy_context = ProxyContext(
+    logger=logger,
+    metrics=metrics,
+    token_manager=token_mgr,
+    model_cache=model_cache,
+    response_cache=response_cache,
+    single_flight=single_flight,
+    body_processor=body_processor,
+    upstream_client=upstream_client,
+    runtime=runtime,
+    config=_current_config,
+    reload=_reload_http_config,
+    rate_limiter=lambda: rpm_limiter,
+    semaphore=lambda: kimi_semaphore,
+)
+
+
 # ==================== HTTP Proxy ====================
-class ProxyHandler(RouteMixin, ResponseMixin, BaseHTTPRequestHandler):
+class ProxyHandler(
+    RouteMixin, ProxyMixin, ExecutionMixin, ResponseMixin, BaseHTTPRequestHandler
+):
     protocol_version = "HTTP/1.1"
     logger = logger
     metrics = metrics
@@ -301,294 +323,8 @@ class ProxyHandler(RouteMixin, ResponseMixin, BaseHTTPRequestHandler):
     token_manager = token_mgr
     response_cache = response_cache
     current_config = staticmethod(_current_config)
-    active_requests = staticmethod(lambda: _active_requests)
-
-    def _forward(self, method):
-        global _active_requests
-        start_time = time.time()
-        client_ip = self._client_ip()
-        request_id = self.headers.get("x-request-id", "")
-        if not request_id:
-            request_id = f"kp-{uuid.uuid4().hex[:12]}"
-
-        # --- Admin endpoints ---
-        if self.path == "/admin/config":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.wfile.write(json.dumps(_current_config()).encode())
-            return
-
-        if self.path == "/admin/reload":
-            _reload_config()
-            global rpm_limiter, kimi_semaphore
-            rpm_limiter = RPMLimiter(RPM_LIMIT)
-            kimi_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT)
-            response_cache.configure(CACHE_TTL, CACHE_MAX_ENTRIES)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "reloaded", "config": _current_config()}).encode())
-            return
-
-        token = token_mgr.get_token()
-        if not token:
-            latency = time.time() - start_time
-            metrics.record_request(latency)
-            logger.warning(f"[{request_id}] {client_ip} -> 401 (no token)")
-            self._send_error(401, "No Kimi Code token available")
-            return
-
-        # --- RPM guard ---
-        if not rpm_limiter.allow():
-            latency = time.time() - start_time
-            metrics.record_request(latency, 429)
-            current_rpm = rpm_limiter.current()
-            logger.warning(f"[{request_id}] {client_ip} -> 429 (RPM limit {current_rpm}/{RPM_LIMIT})")
-            self._send_error(429, f"Rate limit exceeded: {current_rpm} requests in the last minute")
-            return
-
-        # --- Body size guard ---
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length > MAX_BODY_SIZE:
-            latency = time.time() - start_time
-            metrics.record_request(latency, 413)
-            logger.warning(f"[{request_id}] {client_ip} -> 413 (body {content_length} > {MAX_BODY_SIZE})")
-            self._send_error(413, f"Request body too large: {content_length} bytes")
-            return
-
-        body = self.rfile.read(content_length) if content_length > 0 else b""
-        body_len = len(body)
-
-        if DEBUG_BODY and body:
-            logger.debug(f"[{request_id}] Request body preview: {_safe_body_preview(body)}")
-
-        path = self.path
-        if path.startswith("/api/"):
-            path = path[4:]
-        if path.startswith("/v1/models/"):
-            path = "/v1/models"
-
-        # --- Model list cache for GET /v1/models ---
-        if method == "GET" and path == "/v1/models":
-            cached = model_cache.get(token)
-            if cached:
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.wfile.write(cached)
-                self.wfile.flush()
-                logger.info(f"[{request_id}] {client_ip} -> 200 (model_cache_hit)")
-                return
-
-        if path.startswith("/v1/"):
-            target_url = f"{UPSTREAM_BASE}{path}"
-        elif path == "/chat/completions":
-            target_url = f"{UPSTREAM_BASE}/v1/chat/completions"
-        elif path == "/models":
-            target_url = f"{UPSTREAM_BASE}/v1/models"
-        else:
-            target_url = f"{UPSTREAM_BASE}/v1{path}"
-
-        # --- Body enrichment ---
-        model_name = ""
-        req_json = {}
-        try:
-            req_json = json.loads(body) if body else {}
-            if isinstance(req_json, dict):
-                model_name = req_json.get("model", "")
-                # Truncate long conversation history
-                req_json = body_processor.truncate_messages(req_json)
-                # Dynamic max_tokens based on estimated input size
-                if "max_tokens" not in req_json:
-                    suggested = _dynamic_max_tokens(req_json)
-                    req_json["max_tokens"] = suggested
-                    logger.info(f"[{request_id}] Dynamic max_tokens={suggested} (est_input ~{_estimate_tokens(req_json)} tokens)")
-                else:
-                    logger.debug(f"[{request_id}] Preserving max_tokens={req_json['max_tokens']}")
-                req_json = body_processor.inject_thinking(req_json)
-                body = json.dumps(req_json).encode("utf-8")
-                body_len = len(body)
-        except Exception as e:
-            logger.debug(f"[{request_id}] Body enrichment skipped: {e}")
-            if DEBUG_BODY and body:
-                logger.debug(f"[{request_id}] Raw body preview: {_safe_body_preview(body)}")
-        is_stream = bool(isinstance(req_json, dict) and req_json.get("stream"))
-
-        # --- Response cache check ---
-        if method == "POST" and req_json:
-            cached = response_cache.get_semantic(path, req_json)
-            if cached:
-                data, resp_headers = cached
-                self.send_response(200)
-                for h, v in resp_headers:
-                    self.send_header(h, v)
-                self.send_header("X-Cache", "HIT")
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("Connection", "close")
-                self.end_headers()
-                try:
-                    self.wfile.write(data)
-                    self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    logger.debug("Client disconnected during cached response write")
-                latency = time.time() - start_time
-                metrics.record_request(latency, 200, model=model_name)
-                logger.info(f"[{request_id}] {client_ip} -> 200 (cache_hit) latency={latency:.2f}s model={model_name or '-'}")
-                return
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "User-Agent": "KimiCLI/1.5",
-            "Accept": "text/event-stream" if is_stream else "application/json",
-            "X-Request-Id": request_id,
-        }
-        headers.update(token_mgr.get_headers())
-        for key in ("openai-beta", "anthropic-version"):
-            if key in self.headers:
-                headers[key] = self.headers[key]
-
-        acquired = False
-        request_semaphore = kimi_semaphore
-        queue_start = time.time()
-        try:
-            acquired = request_semaphore.acquire(timeout=QUEUE_TIMEOUT)
-            queue_wait = time.time() - queue_start
-            if not acquired:
-                latency = time.time() - start_time
-                metrics.record_request(latency, 503, queue_wait)
-                logger.warning(
-                    f"[{request_id}] {client_ip} -> 503 (queue_full wait={queue_wait:.2f}s active={_active_requests}/{MAX_CONCURRENT})"
-                )
-                self._send_error(
-                    503,
-                    "Kimi API concurrency limit exceeded, try again later",
-                    extra_headers={"Retry-After": str(min(120, UPSTREAM_TIMEOUT))},
-                )
-                return
-
-            with _active_requests_lock:
-                _active_requests += 1
-
-            logger.info(
-                f"[{request_id}] {client_ip} -> {method} {path} "
-                f"body={body_len}b queue_wait={queue_wait:.2f}s active={_active_requests}/{MAX_CONCURRENT}"
-            )
-
-            def _do_request():
-                resp, error = _do_kimi_request(method, target_url, body, headers)
-                if not resp or resp.status != 401:
-                    return resp, error
-                logger.warning(f"[{request_id}] {client_ip} -> 401, refreshing token...")
-                resp.close()
-                if hasattr(resp, "_conn"):
-                    resp._conn.close()
-                if not token_mgr.refresh():
-                    logger.error(f"[{request_id}] Token refresh failed")
-                    return None, RuntimeError("Token refresh failed")
-                new_headers = {
-                    **headers,
-                    "Authorization": f"Bearer {token_mgr.get_token()}",
-                }
-                retried, retry_error = _do_kimi_request(
-                    method, target_url, body, new_headers
-                )
-                if retried and retried.status != 401:
-                    logger.info(f"[{request_id}] Retry after refresh OK")
-                else:
-                    logger.error(f"[{request_id}] Retry after refresh failed")
-                return retried, retry_error
-
-            if is_stream:
-                resp, error = _do_request()
-                if resp:
-                    status = resp.status
-                    resp_len = self._send_stream_response(
-                        status, resp.getheaders(), resp
-                    )
-                    latency = time.time() - start_time
-                    metrics.record_request(latency, status, queue_wait, model_name)
-                    logger.info(
-                        f"[{request_id}] {client_ip} -> {status} (stream) "
-                        f"latency={latency:.2f}s queue={queue_wait:.2f}s "
-                        f"req={body_len}b resp={resp_len}b model={model_name or '-'}"
-                    )
-                    return
-            else:
-                def _buffered_request():
-                    response, request_error = _do_request()
-                    if not response:
-                        return None, [], b"", request_error
-                    try:
-                        return (
-                            response.status,
-                            response.getheaders(),
-                            response.read(),
-                            None,
-                        )
-                    finally:
-                        response.close()
-                        if hasattr(response, "_conn"):
-                            response._conn.close()
-
-                try:
-                    result, coalesced = single_flight.do(
-                        method, path, body, _buffered_request
-                    )
-                    status, resp_headers, resp_body, error = result
-                except Exception as e:
-                    status, resp_headers, resp_body, error = None, [], b"", e
-                    coalesced = False
-
-            if not is_stream and status is not None:
-                latency = time.time() - start_time
-                resp_len = len(resp_body)
-                tokens = {"input": 0, "output": 0, "total": 0}
-                if resp_body:
-                    try:
-                        usage = json.loads(resp_body).get("usage", {})
-                        tokens["input"] = usage.get("prompt_tokens", 0)
-                        tokens["output"] = usage.get("completion_tokens", 0)
-                        tokens["total"] = usage.get("total_tokens", 0)
-                    except Exception:
-                        pass
-                if DEBUG_BODY and resp_body:
-                    logger.debug(f"[{request_id}] Response body preview: {_safe_body_preview(resp_body)}")
-                # Store successful response in cache
-                if req_json and status == 200:
-                    response_cache.put(path, req_json, resp_body, resp_headers, status)
-                metrics.record_request(latency, status, queue_wait, model_name, tokens)
-                coalesced_tag = " (coalesced)" if coalesced else ""
-                log_level = logger.warning if latency > SLOW_REQUEST_THRESHOLD else logger.info
-                log_level(
-                    f"[{request_id}] {client_ip} -> {status}{coalesced_tag} "
-                    f"latency={latency:.2f}s queue={queue_wait:.2f}s "
-                    f"req={body_len}b resp={resp_len}b "
-                    f"tokens={tokens['input']}+{tokens['output']}={tokens['total']} "
-                    f"model={model_name or '-'}"
-                )
-                self._send_response(status, resp_headers, resp_body)
-            else:
-                latency = time.time() - start_time
-                err_type, err_msg = classify_error(error)
-                if err_type == "upstream_timeout":
-                    metrics.record_timeout()
-                else:
-                    metrics.record_request(latency, 502, queue_wait, model_name)
-                logger.error(
-                    f"[{request_id}] {client_ip} -> 502 ({err_type}) "
-                    f"latency={latency:.2f}s queue={queue_wait:.2f}s: {err_msg}"
-                )
-                self._send_error(502, f"{err_type}: {err_msg}")
-        finally:
-            if acquired:
-                with _active_requests_lock:
-                    _active_requests -= 1
-                request_semaphore.release()
+    active_requests = staticmethod(runtime.request_count)
+    context = proxy_context
 
 def _signal_handler(signum, frame):
     sig_name = signal.Signals(signum).name
@@ -639,11 +375,12 @@ def main():
 
     # Wait for active requests to complete
     wait_start = time.time()
-    while _active_requests > 0 and (time.time() - wait_start) < GRACEFUL_SHUTDOWN_WAIT:
+    while runtime.request_count() > 0 and (time.time() - wait_start) < GRACEFUL_SHUTDOWN_WAIT:
         time.sleep(0.1)
 
-    if _active_requests > 0:
-        logger.warning(f"Force shutdown with {_active_requests} active requests remaining")
+    active_requests = runtime.request_count()
+    if active_requests > 0:
+        logger.warning(f"Force shutdown with {active_requests} active requests remaining")
     else:
         logger.info("All active requests completed, shutdown cleanly")
 
