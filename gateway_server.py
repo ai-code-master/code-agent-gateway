@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import http.client
 import json
-import logging
 import os
 import signal
 import sys
@@ -39,6 +38,7 @@ from gateway.config import GatewayConfig
 from gateway.cache import ModelListCache, ResponseCache, SingleFlight
 from gateway.errors import classify_error
 from gateway.limits import RPMLimiter
+from gateway.logging_setup import build_logger, install_exception_hook
 from gateway.metrics import Metrics
 from gateway.request_body import (
     RequestBodyProcessor,
@@ -179,88 +179,10 @@ if not CLIENT_ID:
     print("ERROR: KCP_CLIENT_ID is required. Set it in your .env file.", file=sys.stderr)
     sys.exit(1)
 
-# ==================== Logging ====================
-os.makedirs(LOG_DIR, exist_ok=True)
-
-
-def _ensure_disk_space():
-    """If log dir is over limit, delete oldest backup files."""
-    try:
-        total = 0
-        files = []
-        for entry in os.listdir(LOG_DIR):
-            path = os.path.join(LOG_DIR, entry)
-            if os.path.isfile(path) and "kimi-proxy" in entry:
-                s = os.path.getsize(path)
-                total += s
-                files.append((path, os.path.getmtime(path), s))
-        if total > LOG_DIR_MAX_BYTES:
-            files.sort(key=lambda x: x[1])  # oldest first
-            for path, mtime, s in files:
-                if total <= LOG_DIR_MAX_BYTES * 0.8:
-                    break
-                try:
-                    os.remove(path)
-                    total -= s
-                    print(f"[kimi-proxy] Disk guard: removed old log {path}", file=sys.stderr)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-
-class RotatingLogHandler(logging.Handler):
-    def __init__(self, filename, max_bytes, backup_count):
-        super().__init__()
-        self.filename = filename
-        self.max_bytes = max_bytes
-        self.backup_count = backup_count
-        self.stream = None
-        self._lock = threading.Lock()
-        self._open()
-
-    def _open(self):
-        if self.stream:
-            self.stream.close()
-        self.stream = open(self.filename, "a", encoding="utf-8")
-
-    def _rotate(self):
-        if os.path.exists(self.filename) and os.path.getsize(self.filename) >= self.max_bytes:
-            self.stream.close()
-            for i in range(self.backup_count - 1, 0, -1):
-                src, dst = f"{self.filename}.{i}", f"{self.filename}.{i+1}"
-                if os.path.exists(src):
-                    os.replace(src, dst)
-            if os.path.exists(self.filename):
-                os.replace(self.filename, f"{self.filename}.1")
-            self._open()
-
-    def emit(self, record):
-        try:
-            with self._lock:
-                _ensure_disk_space()
-                self._rotate()
-                self.stream.write(self.format(record) + "\n")
-                self.stream.flush()
-        except Exception:
-            pass
-
-
-_handler = RotatingLogHandler(LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT)
-_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-logger = logging.getLogger("kimi-proxy")
-logger.setLevel(logging.INFO)
-logger.addHandler(_handler)
-
-# Also capture uncaught exceptions from threads into our log
-def _log_uncaught(exc_type, exc_value, exc_traceback):
-    if issubclass(exc_type, (SystemExit, KeyboardInterrupt)):
-        sys.__excepthook__(exc_type, exc_value, exc_traceback)
-        return
-    logger.error("Uncaught exception: %s", exc_value, exc_info=(exc_type, exc_value, exc_traceback))
-
-
-sys.excepthook = _log_uncaught
+logger = build_logger(
+    LOG_DIR, LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, LOG_DIR_MAX_BYTES
+)
+install_exception_hook(logger)
 
 metrics = Metrics(SLOW_REQUEST_THRESHOLD)
 
