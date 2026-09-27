@@ -13,6 +13,7 @@ from codex_bridge.appserver import AppServerPool
 from codex_bridge.process import _child_environment
 from gateway.compat import chat_to_response, responses_to_chat
 from gateway.config import GatewayConfig
+from gateway.http.routes import RouteMixin
 from gateway.provider.health import UpstreamHealth
 
 
@@ -119,6 +120,21 @@ class ProviderHealthTests(unittest.TestCase):
         self.assertEqual(
             health.provider_status(), {"kimi": True, "codex": False}
         )
+
+
+class PublicRouteTests(unittest.TestCase):
+    def test_root_returns_service_discovery_without_forwarding(self):
+        calls = []
+        route = RouteMixin()
+        route.path = "/"
+        route._json = lambda status, payload: calls.append((status, payload))
+        route._forward = lambda method: self.fail(f"forwarded {method}")
+
+        route.do_GET()
+
+        self.assertEqual(calls[0][0], 200)
+        self.assertEqual(calls[0][1]["health"], "/healthz")
+        self.assertEqual(calls[0][1]["models"], "/v1/models")
 
 
 if __name__ == "__main__":

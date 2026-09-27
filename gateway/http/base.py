@@ -9,7 +9,7 @@ class ResponseMixin:
 
     def log_message(self, format, *args):
         quiet = (
-            "/healthz", "/metrics", "/admin/config", "/admin/reload",
+            "/", "/healthz", "/metrics", "/admin/config", "/admin/reload",
             "/v1/models", "/models",
         )
         if self.path not in quiet:

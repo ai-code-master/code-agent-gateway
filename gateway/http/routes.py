@@ -11,6 +11,8 @@ class RouteMixin:
     active_requests = None
 
     def do_GET(self):
+        if self.path == "/":
+            return self._root()
         if self.path == "/healthz":
             return self._health()
         if self.path == "/metrics":
@@ -19,6 +21,15 @@ class RouteMixin:
 
     def do_POST(self):
         return self._forward("POST")
+
+    def _root(self):
+        self._json(200, {
+            "name": "code-agent-gateway",
+            "version": "3.2",
+            "status": "ok",
+            "health": "/healthz",
+            "models": "/v1/models",
+        })
 
     def _health(self):
         upstream_ok = self.upstream_health.is_healthy()
