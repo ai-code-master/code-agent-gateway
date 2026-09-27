@@ -38,6 +38,8 @@ import urllib.parse
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
+from gateway.config import GatewayConfig
+
 # ==================== Configuration ====================
 def _env(key, default=""):
     return os.environ.get(key, default)
@@ -69,6 +71,7 @@ def _load_dotenv(path=".env", override=False):
 
 def _reload_config():
     """Re-read .env and update runtime globals."""
+    global CONFIG
     global MAX_CONCURRENT, RPM_LIMIT, MAX_RETRIES, BACKOFF_BASE
     global REFRESH_INTERVAL, REFRESH_THRESHOLD, UPSTREAM_TIMEOUT
     global QUEUE_TIMEOUT, MAX_BODY_SIZE, SLOW_REQUEST_THRESHOLD
@@ -76,6 +79,7 @@ def _reload_config():
 
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     _load_dotenv(os.path.join(_script_dir, ".env"), override=True)
+    CONFIG = GatewayConfig.from_env()
 
     MAX_CONCURRENT   = int(_env("KCP_MAX_CONCURRENT", "30"))
     RPM_LIMIT        = int(_env("KCP_RPM_LIMIT", "0"))
@@ -110,6 +114,7 @@ def _reload_config():
 # Auto-load .env from the same directory as this script
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _load_dotenv(os.path.join(_script_dir, ".env"))
+CONFIG = GatewayConfig.from_env()
 
 # Paths
 CREDENTIALS_PATH = _env("KCP_CREDENTIALS_PATH", os.path.expanduser("~/.kimi-code/credentials/kimi-code.json"))

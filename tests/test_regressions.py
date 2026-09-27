@@ -18,6 +18,8 @@ sys.path.insert(0, os.path.join(ROOT, "codex_bridge"))
 
 import gateway_server as proxy
 from appserver import _await_turn
+from gateway.config import GatewayConfig
+from gateway.runtime import RuntimeState
 
 
 class CacheTests(unittest.TestCase):
@@ -75,6 +77,18 @@ class CacheTests(unittest.TestCase):
         self.assertIsNone(
             self.cache.get_semantic("/v1/chat/completions", changed_context)
         )
+
+
+class GatewayBoundaryTests(unittest.TestCase):
+    def test_config_reads_legacy_environment_contract(self):
+        config = GatewayConfig.from_env()
+        self.assertEqual(config.client_id, "test-client")
+        self.assertEqual(config.host, "127.0.0.1")
+
+    def test_runtime_tracks_active_requests(self):
+        state = RuntimeState()
+        self.assertEqual(state.begin_request(), 1)
+        self.assertEqual(state.end_request(), 0)
 
 
 class SingleFlightTests(unittest.TestCase):
