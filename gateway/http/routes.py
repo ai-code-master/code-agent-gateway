@@ -29,7 +29,7 @@ class RouteMixin:
             "ready": ready,
             "upstream_healthy": upstream_ok,
             "providers": self.upstream_health.provider_status(),
-            "version": "3.1",
+            "version": "3.2",
             **self.token_manager.status(),
             "concurrent_limit": config["max_concurrent"],
             "concurrent_active": self.active_requests(),
@@ -40,6 +40,8 @@ class RouteMixin:
             "features": self._features(config),
         }
         payload["codex_pool"] = self.codex_provider.status()
+        payload["kimi_transport"] = self.context.upstream_client.status()
+        payload["model_cache"] = self.context.model_cache.status()
         self._json(200 if ready else 503, payload)
 
     def _metrics(self):
@@ -70,7 +72,7 @@ class RouteMixin:
             "full_xmsh_headers", "thinking_injection", "metrics",
             "structured_access_log", "client_reset_guard", "body_size_guard",
             "upstream_health_probe", "model_list_cache", "dynamic_max_tokens",
-            "hot_reload", "token_tracking", "true_streaming",
+            "runtime_config_reload", "token_tracking", "true_streaming",
             "unified_provider_routing", "codex_app_server",
         ]
         flags = (

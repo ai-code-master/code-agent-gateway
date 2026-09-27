@@ -50,6 +50,34 @@ def start_thread(proc, output, cwd, tools, model, timeout):
     raise AppServerError("thread/start timed out")
 
 
+def list_models(proc, output, timeout):
+    deadline = time.monotonic() + timeout
+    request_id, cursor, models = 100, None, []
+    while time.monotonic() < deadline:
+        params = {"includeHidden": False}
+        if cursor:
+            params["cursor"] = cursor
+        send(proc, {
+            "method": "model/list", "id": request_id, "params": params,
+        })
+        while time.monotonic() < deadline:
+            message = next_message(output, deadline)
+            if message.get("id") != request_id:
+                continue
+            raise_rpc_error(message)
+            result = message.get("result", {})
+            models.extend(
+                item["id"] for item in result.get("data", [])
+                if isinstance(item, dict) and item.get("id")
+            )
+            cursor = result.get("nextCursor")
+            break
+        if not cursor:
+            return list(dict.fromkeys(models))
+        request_id += 1
+    raise AppServerError("model/list timed out")
+
+
 def await_turn(output, timeout, on_delta=None):
     deadline = time.monotonic() + timeout
     final_messages, unknown_messages, phases, streamed_ids = [], [], {}, set()

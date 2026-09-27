@@ -12,6 +12,7 @@ from gateway.request_body import RequestBodyProcessor
 from gateway.runtime import runtime
 
 from .handler import create_handler
+from .admission import AdmissionController
 from .server import run
 from .settings import SettingsStore
 
@@ -29,7 +30,7 @@ class GatewayApplication:
         self.runtime = runtime
         self.metrics = Metrics(config.slow_request_threshold)
         self.rate_limiter = RPMLimiter(config.rpm_limit)
-        self.semaphore = threading.BoundedSemaphore(config.max_concurrent)
+        self.admission = AdmissionController(self.runtime, config.max_concurrent)
         self.model_cache = ModelListCache(config.upstream_base, self.logger)
         self.response_cache = ResponseCache(
             ttl=config.cache_ttl,
@@ -42,7 +43,11 @@ class GatewayApplication:
             timeout=lambda: self.settings.current.single_flight_timeout,
         )
         self.token_manager = self._token_manager()
-        self.codex_provider = CodexProvider(self.logger)
+        self.codex_provider = CodexProvider(
+            self.logger,
+            queue_timeout=lambda: self.settings.current.codex_queue_timeout,
+            request_timeout=lambda: self.settings.current.upstream_timeout,
+        )
         self.upstream_health = UpstreamHealth(
             self.token_manager, config.upstream_base, self.logger,
             codex_probe=self.codex_provider.health,
@@ -57,6 +62,9 @@ class GatewayApplication:
             timeout=lambda: self.settings.current.upstream_timeout,
             max_retries=lambda: self.settings.current.max_retries,
             backoff_base=lambda: self.settings.current.backoff_base,
+            max_idle=lambda: self.settings.current.upstream_idle_connections,
+            circuit_threshold=lambda: self.settings.current.circuit_failure_threshold,
+            circuit_cooldown=lambda: self.settings.current.circuit_cooldown,
             logger=self.logger,
             metrics=self.metrics,
         )
@@ -70,11 +78,10 @@ class GatewayApplication:
             body_processor=self.body_processor,
             upstream_client=self.upstream_client,
             codex_provider=self.codex_provider,
-            runtime=self.runtime,
+            admission=self.admission,
             config=self.public_config,
             reload=self.reload,
             rate_limiter=lambda: self.rate_limiter,
-            semaphore=lambda: self.semaphore,
         )
         self.handler = create_handler(self)
 
@@ -98,22 +105,48 @@ class GatewayApplication:
         return self.settings.current.public()
 
     def reload(self):
+        previous = self.settings.current
         config = self.settings.reload()
         self.rate_limiter = RPMLimiter(config.rpm_limit)
-        self.semaphore = threading.BoundedSemaphore(config.max_concurrent)
+        self.admission.configure(config.max_concurrent)
         self.response_cache.configure(config.cache_ttl, config.cache_max_entries)
         self.metrics.slow_threshold = config.slow_request_threshold
+        static_fields = (
+            "host", "port", "upstream_base", "auth_endpoint",
+            "credentials_path", "device_id_path", "client_id",
+            "device_platform", "device_version", "device_name",
+            "device_model", "os_version",
+            "http_workers", "http_pending", "http_backlog",
+        )
+        restart_required = [
+            name for name in static_fields
+            if getattr(previous, name) != getattr(config, name)
+        ]
+        if restart_required:
+            self.logger.warning(
+                "Restart required for config changes: %s",
+                ", ".join(restart_required),
+            )
         self.logger.info("Config reloaded")
-        return config.public()
+        result = config.public()
+        result["restart_required_changes"] = restart_required
+        return result
 
     def start_workers(self):
+        self.model_cache.warm(self.token_manager.get_token())
+        self.codex_provider.warm_models()
         threading.Thread(target=self._refresh_worker, daemon=True).start()
         threading.Thread(target=self._health_worker, daemon=True).start()
 
     def _refresh_worker(self):
-        while not self.runtime.shutdown_event.wait(
-            self.settings.current.refresh_interval
-        ):
+        while not self.runtime.shutdown_event.is_set():
+            config = self.settings.current
+            interval = min(
+                config.refresh_interval,
+                max(15, config.refresh_threshold // 2),
+            )
+            if self.runtime.shutdown_event.wait(interval):
+                break
             if self.token_manager.should_refresh():
                 self.logger.info("Token expiring, refreshing...")
                 self.token_manager.refresh()

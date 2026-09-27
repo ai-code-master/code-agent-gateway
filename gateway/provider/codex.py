@@ -4,9 +4,8 @@ import threading
 import time
 
 from codex_bridge.appserver import (
-    AppServerError, pool_stats, probe_codex, run_codex,
+    AppServerError, discover_models, pool_stats, probe_codex, run_codex,
 )
-from codex_bridge.catalog import discover
 from codex_bridge.chat import build_prompt, detect_cwd, dynamic_tools
 from codex_bridge.responses import completion
 
@@ -22,11 +21,16 @@ PUBLIC_MODELS = ("codex-spark", "codex-sol", "codex-terra", "codex-luna")
 
 
 class CodexProvider:
-    def __init__(self, logger):
+    def __init__(
+        self, logger, queue_timeout=lambda: 30, request_timeout=lambda: 600
+    ):
         self._logger = logger
+        self._queue_timeout = queue_timeout
+        self._request_timeout = request_timeout
         self._models = ()
         self._models_at = 0.0
         self._model_lock = threading.Lock()
+        self._models_refreshing = False
 
     @staticmethod
     def handles(model):
@@ -57,7 +61,8 @@ class CodexProvider:
         )
         result = run_codex(
             build_prompt(messages), cwd, tools=tools, effort=effort,
-            model=model, on_delta=on_delta,
+            model=model, timeout=self._request_timeout(),
+            pool_timeout=self._queue_timeout(), on_delta=on_delta,
         )
         return result, requested
 
@@ -73,6 +78,9 @@ class CodexProvider:
     def status():
         return pool_stats()
 
+    def warm_models(self):
+        self._discover_models()
+
     @staticmethod
     def _resolve(requested, requested_effort):
         normalized = requested
@@ -87,13 +95,25 @@ class CodexProvider:
         with self._model_lock:
             if time.time() - self._models_at <= 60:
                 return self._models
-            try:
-                self._models = tuple(discover())
-            except Exception as error:
-                self._logger.warning("Codex model discovery skipped: %s", error)
-                self._models = ()
-            self._models_at = time.time()
+            if not self._models_refreshing:
+                self._models_refreshing = True
+                threading.Thread(
+                    target=self._refresh_models, daemon=True,
+                    name="codex-model-refresh",
+                ).start()
             return self._models
+
+    def _refresh_models(self):
+        try:
+            models = tuple(discover_models())
+        except Exception as error:
+            self._logger.warning("Codex model discovery skipped: %s", error)
+            models = None
+        with self._model_lock:
+            if models is not None:
+                self._models = models
+                self._models_at = time.time()
+            self._models_refreshing = False
 
 
 __all__ = ["AppServerError", "CodexProvider"]

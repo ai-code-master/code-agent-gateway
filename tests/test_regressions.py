@@ -31,6 +31,7 @@ class CacheTests(unittest.TestCase):
         self.cache = proxy.ResponseCache(ttl=60, max_entries=10)
         self.base = {
             "model": "k3",
+            "temperature": 0,
             "messages": [
                 {"role": "system", "content": "same context"},
                 {"role": "user", "content": "hello world"},
@@ -48,6 +49,7 @@ class CacheTests(unittest.TestCase):
     def test_normalized_equivalence_hits(self):
         request = {
             "model": "k3",
+            "temperature": 0,
             "messages": [
                 {"role": "system", "content": "same context"},
                 {"role": "user", "content": "  hello world\r\n"},
@@ -61,6 +63,7 @@ class CacheTests(unittest.TestCase):
     def test_changed_prompt_or_context_misses(self):
         changed = {
             "model": "k3",
+            "temperature": 0,
             "messages": [
                 {"role": "system", "content": "same context"},
                 {"role": "user", "content": "hello worlds"},
@@ -68,6 +71,7 @@ class CacheTests(unittest.TestCase):
         }
         changed_context = {
             "model": "k3",
+            "temperature": 0,
             "messages": [
                 {"role": "system", "content": "different context"},
                 {"role": "user", "content": "hello world"},

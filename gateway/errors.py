@@ -5,6 +5,8 @@ import ssl
 
 
 def classify_error(error):
+    if type(error).__name__ == "CircuitOpenError":
+        return "upstream_circuit_open", str(error)
     if isinstance(error, socket.timeout):
         return "upstream_timeout", "Upstream read timed out (model may be thinking too long)"
     if isinstance(error, ConnectionResetError):

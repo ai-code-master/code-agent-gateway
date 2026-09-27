@@ -8,6 +8,8 @@ import threading
 import time
 import urllib.parse
 
+from .credentials import atomic_save_credentials, load_credentials
+
 
 class TokenManager:
     def __init__(self, credentials_path, device_id_path, auth_endpoint,
@@ -41,30 +43,28 @@ class TokenManager:
             return "unknown"
 
     def _load(self):
-        try:
-            with open(self._credentials_path, encoding="utf-8") as source:
-                self._data = json.load(source)
-            self._mtime = os.path.getmtime(self._credentials_path)
+        previous = self._data
+        self._data, self._mtime = load_credentials(
+            self._credentials_path, self._data, self._mtime, self._logger
+        )
+        if self._data is not previous:
             remaining = max(0, self._data.get("expires_at", 0) - time.time())
             self._logger.info("Token loaded, remaining %.0fs", remaining)
-        except (OSError, ValueError) as error:
-            self._logger.error("Load token failed: %s", error)
-            self._data = {}
 
     def _maybe_reload(self):
         try:
             modified = os.path.getmtime(self._credentials_path)
         except OSError:
             return
-        if self._mtime is not None and modified != self._mtime:
+        if self._mtime is None or modified != self._mtime:
             self._logger.info("Credentials file changed on disk, reloading")
             self._load()
 
     def _save(self):
         try:
-            with open(self._credentials_path, "w", encoding="utf-8") as target:
-                json.dump(self._data, target, indent=2)
-            self._mtime = os.path.getmtime(self._credentials_path)
+            self._mtime = atomic_save_credentials(
+                self._credentials_path, self._data
+            )
         except OSError as error:
             self._logger.error("Save token failed: %s", error)
 
@@ -104,7 +104,9 @@ class TokenManager:
         with self._refresh_lock:
             if self._refreshing:
                 self._logger.info("Waiting for refresh...")
-                self._refresh_cond.wait(timeout=30)
+                self._refresh_cond.wait_for(
+                    lambda: not self._refreshing, timeout=30
+                )
                 with self._lock:
                     return self._data.get("expires_at", 0) > time.time() + 10
             self._refreshing = True
@@ -122,29 +124,38 @@ class TokenManager:
         with self._lock:
             self._maybe_reload()
             refresh_token = self._data.get("refresh_token", "")
+            observed_mtime = self._mtime
             if not refresh_token:
                 self._logger.warning("No refresh_token available")
                 return False
-            parsed = urllib.parse.urlparse(self._auth_endpoint)
-            connection = http.client.HTTPSConnection(parsed.netloc, timeout=30)
-            try:
-                body = urllib.parse.urlencode({
-                    "grant_type": "refresh_token",
-                    "client_id": self._client_id,
-                    "refresh_token": refresh_token,
-                })
-                connection.request("POST", parsed.path, body=body, headers={
-                    "Content-Type": "application/x-www-form-urlencoded"
-                })
-                response = connection.getresponse()
-                response_body = response.read()
-            finally:
-                connection.close()
-            if response.status != 200:
-                summary = response_body.decode("utf-8", errors="replace")[:200]
-                self._logger.error("Token refresh HTTP %s: %s", response.status, summary)
-                return False
-            tokens = json.loads(response_body)
+        parsed = urllib.parse.urlparse(self._auth_endpoint)
+        connection = http.client.HTTPSConnection(parsed.netloc, timeout=30)
+        try:
+            body = urllib.parse.urlencode({
+                "grant_type": "refresh_token",
+                "client_id": self._client_id,
+                "refresh_token": refresh_token,
+            })
+            connection.request("POST", parsed.path, body=body, headers={
+                "Content-Type": "application/x-www-form-urlencoded"
+            })
+            response = connection.getresponse()
+            response_body = response.read()
+        finally:
+            connection.close()
+        if response.status != 200:
+            summary = response_body.decode("utf-8", errors="replace")[:200]
+            self._logger.error("Token refresh HTTP %s: %s", response.status, summary)
+            return False
+        tokens = json.loads(response_body)
+        with self._lock:
+            self._maybe_reload()
+            if (
+                self._mtime != observed_mtime
+                and self._data.get("expires_at", 0) > time.time() + 30
+            ):
+                self._logger.info("Credentials refreshed by another process")
+                return True
             self._data.update({
                 "access_token": tokens["access_token"],
                 "refresh_token": tokens["refresh_token"],
@@ -153,5 +164,5 @@ class TokenManager:
                 "expires_at": time.time() + tokens.get("expires_in", 900),
             })
             self._save()
-            self._logger.info("Token refresh OK")
-            return True
+        self._logger.info("Token refresh OK")
+        return True

@@ -16,11 +16,12 @@ class Metrics:
         self.status_counts = {}
         self.queue_wait_sum = self.queue_wait_count = 0.0
         self.model_counts = {}
+        self.provider_stats = {}
         self.input_tokens_sum = self.output_tokens_sum = self.total_tokens_sum = 0
         self.token_record_count = 0
 
     def record_request(self, latency, status=None, queue_wait=0.0,
-                       model="", tokens=None):
+                       model="", tokens=None, provider=""):
         with self._lock:
             self.request_count += 1
             self.latency_sum += latency
@@ -34,6 +35,14 @@ class Metrics:
                     self.error_count += 1
             if model:
                 self.model_counts[model] = self.model_counts.get(model, 0) + 1
+            if provider:
+                stats = self.provider_stats.setdefault(
+                    provider, {"requests": 0, "errors": 0, "latency": 0.0}
+                )
+                stats["requests"] += 1
+                stats["latency"] += latency
+                if status is not None and (status >= 500 or status == 429):
+                    stats["errors"] += 1
             if latency > self.slow_threshold:
                 self.slow_request_count += 1
             if tokens:
@@ -45,7 +54,6 @@ class Metrics:
     def record_timeout(self):
         with self._lock:
             self.timeout_count += 1
-            self.error_count += 1
 
     def record_retry(self):
         with self._lock:
@@ -71,6 +79,16 @@ class Metrics:
                 "avg_queue_wait_ms": round(queue * 1000, 2),
                 "status_counts": dict(self.status_counts),
                 "model_counts": dict(self.model_counts),
+                "providers": {
+                    name: {
+                        "requests": values["requests"],
+                        "errors": values["errors"],
+                        "avg_latency_ms": round(
+                            values["latency"] * 1000 / values["requests"], 2
+                        ),
+                    }
+                    for name, values in self.provider_stats.items()
+                },
                 "tokens": {
                     "input_total": self.input_tokens_sum,
                     "output_total": self.output_tokens_sum,

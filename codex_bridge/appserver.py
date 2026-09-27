@@ -3,6 +3,7 @@
 import os
 import queue
 import threading
+import time
 
 from .process import AppServerProcess
 from .protocol import AppServerError, await_turn as _await_turn
@@ -14,9 +15,14 @@ class AppServerPool:
         self._available = queue.LifoQueue()
         self._all = []
         self._lock = threading.Lock()
+        self._wait_count = 0
+        self._wait_total = 0.0
+        self._timeout_count = 0
 
-    def run(self, *args, **kwargs):
-        process = self._acquire(kwargs.get("timeout", 900))
+    def run(self, *args, pool_timeout=None, **kwargs):
+        process = self._acquire(
+            pool_timeout if pool_timeout is not None else kwargs.get("timeout", 900)
+        )
         healthy = True
         try:
             return process.run(*args, **kwargs)
@@ -27,12 +33,26 @@ class AppServerPool:
             self._release(process, healthy)
 
     def probe(self):
+        with self._lock:
+            if any(process.alive for process in self._all):
+                return True
         process = self._acquire(10)
         try:
             process.start()
             return process.alive
         finally:
             self._release(process, process.alive)
+
+    def models(self, timeout=8):
+        process = self._acquire(timeout)
+        healthy = True
+        try:
+            return process.models(timeout)
+        except Exception:
+            healthy = False
+            raise
+        finally:
+            self._release(process, healthy)
 
     def stats(self):
         with self._lock:
@@ -41,11 +61,18 @@ class AppServerPool:
                 "processes": len(self._all),
                 "idle": self._available.qsize(),
                 "healthy": sum(item.alive for item in self._all),
+                "busy": len(self._all) - self._available.qsize(),
+                "wait_count": self._wait_count,
+                "avg_wait_ms": round(
+                    self._wait_total * 1000 / self._wait_count, 2
+                ) if self._wait_count else 0.0,
+                "timeout_count": self._timeout_count,
             }
 
     def close(self):
         with self._lock:
             processes, self._all = self._all, []
+            self._available = queue.LifoQueue()
         for process in processes:
             process.close()
 
@@ -59,9 +86,15 @@ class AppServerPool:
                     self._all.append(process)
                     return process
             try:
+                started = time.monotonic()
                 process = self._available.get(timeout=timeout)
             except queue.Empty as error:
+                with self._lock:
+                    self._timeout_count += 1
                 raise AppServerError("Codex process pool is busy") from error
+            with self._lock:
+                self._wait_count += 1
+                self._wait_total += time.monotonic() - started
         if process.alive or process.proc is None:
             return process
         self._discard(process)
@@ -94,10 +127,10 @@ def _pool():
 
 
 def run_codex(prompt, cwd, tools=None, effort=None, model=None,
-              timeout=900, on_delta=None):
+              timeout=900, pool_timeout=None, on_delta=None):
     return _pool().run(
         prompt, cwd, tools=tools, effort=effort, model=model,
-        timeout=timeout, on_delta=on_delta,
+        timeout=timeout, pool_timeout=pool_timeout, on_delta=on_delta,
     )
 
 
@@ -106,6 +139,10 @@ def probe_codex():
         return _pool().probe()
     except Exception:
         return False
+
+
+def discover_models(timeout=8):
+    return _pool().models(timeout)
 
 
 def pool_stats():

@@ -14,6 +14,7 @@ class BoundedRotatingHandler(logging.Handler):
         self.backup_count = backup_count
         self.directory_limit = directory_limit
         self._lock = threading.Lock()
+        self._emits = 0
         self.stream = None
         self._open()
 
@@ -60,7 +61,9 @@ class BoundedRotatingHandler(logging.Handler):
     def emit(self, record):
         try:
             with self._lock:
-                self._trim_directory()
+                self._emits += 1
+                if self._emits % 100 == 0:
+                    self._trim_directory()
                 self._rotate()
                 self.stream.write(self.format(record) + "\n")
                 self.stream.flush()

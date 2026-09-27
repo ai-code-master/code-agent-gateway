@@ -14,11 +14,10 @@ class ProxyContext:
     body_processor: object
     upstream_client: object
     codex_provider: object
-    runtime: object
+    admission: object
     config: object
     reload: object
     rate_limiter: object
-    semaphore: object
 
 
 @dataclass

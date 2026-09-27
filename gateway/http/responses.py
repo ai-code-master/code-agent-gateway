@@ -17,17 +17,37 @@ class ResponsesMixin:
                 "message": "/v1/responses currently requires a codex model",
                 "type": "invalid_request_error",
             }})
+        config = self.context.config()
+        lease, queue_wait = self.context.admission.acquire(config["queue_timeout"])
+        if not lease:
+            self.context.metrics.record_request(
+                time.time() - started_at, 503, queue_wait,
+                model=chat["model"], provider="codex",
+            )
+            return self._send_error(
+                503, "Gateway concurrency limit exceeded",
+                {"Retry-After": str(min(120, config["upstream_timeout"]))},
+            )
+        with lease:
+            return self._run_response_request(
+                chat, body, started_at, request_id, client_ip, queue_wait
+            )
+
+    def _run_response_request(
+        self, chat, body, started_at, request_id, client_ip, queue_wait
+    ):
         headers = {key.lower(): value for key, value in self.headers.items()}
         try:
             if chat["stream"]:
                 return self._stream_response_api(
-                    chat, body, headers, started_at, request_id
+                    chat, body, headers, started_at, request_id, queue_wait
                 )
             result = self.context.codex_provider.complete(chat, headers)
             payload = chat_to_response(result, body)
             latency = time.time() - started_at
             self.context.metrics.record_request(
-                latency, 200, model=chat["model"]
+                latency, 200, queue_wait, model=chat["model"],
+                provider="codex",
             )
             self.context.logger.info(
                 "[%s] %s -> 200 (responses) latency=%.2fs model=%s",
@@ -39,12 +59,16 @@ class ResponsesMixin:
                 "message": str(error), "type": "invalid_request_error",
             }})
         except AppServerError as error:
+            self.context.metrics.record_request(
+                time.time() - started_at, 502, queue_wait,
+                model=chat["model"], provider="codex",
+            )
             return self._json(502, {"error": {
                 "message": str(error), "type": "codex_backend_error",
             }})
 
     def _stream_response_api(
-        self, chat, original, headers, started_at, request_id
+        self, chat, original, headers, started_at, request_id, queue_wait
     ):
         response_id = f"resp_{uuid.uuid4().hex}"
         item_id = f"msg_{uuid.uuid4().hex}"
@@ -86,9 +110,14 @@ class ResponsesMixin:
             )
             self._response_event("response.completed", {"response": payload})
             self.context.metrics.record_request(
-                time.time() - started_at, 200, model=model
+                time.time() - started_at, 200, queue_wait, model=model,
+                provider="codex",
             )
         except AppServerError as error:
+            self.context.metrics.record_request(
+                time.time() - started_at, 502, queue_wait, model=model,
+                provider="codex",
+            )
             self._response_event("response.failed", {"response": {
                 "id": response_id, "object": "response", "status": "failed",
                 "error": {"message": str(error), "type": "codex_backend_error"},

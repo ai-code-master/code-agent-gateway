@@ -25,15 +25,9 @@ class ResponseCache:
             return ""
         if body.get("stream") or body.get("tools") or body.get("tool_choice"):
             return ""
-        cacheable = {
-            "model", "messages", "temperature", "top_p", "max_tokens",
-            "presence_penalty", "frequency_penalty", "response_format",
-            "thinking", "reasoning_effort",
-        }
-        payload = {key: body.get(key) for key in cacheable if key in body}
-        if payload.get("temperature") == 1.0:
-            del payload["temperature"]
-        raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        if body.get("temperature") != 0:
+            return ""
+        raw = json.dumps(body, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(raw.encode()).hexdigest()
 
     @staticmethod
@@ -129,6 +123,7 @@ class ResponseCache:
                 "entries": len(self._cache),
                 "ttl": self._ttl,
                 "max_entries": self._max_entries,
+                "policy": "temperature_zero_only",
                 "hit_count": self._hit_count,
                 "equivalence_hits": self._equivalence_hit_count,
                 "miss_count": self._miss_count,

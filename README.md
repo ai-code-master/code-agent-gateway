@@ -27,6 +27,7 @@ control plane. Its priorities are:
 - reuse local login sessions without copying short-lived access tokens;
 - translate provider protocols to OpenAI-compatible APIs;
 - keep provider processes healthy and reusable;
+- apply bounded queues, retries, and circuit breaking under load;
 - expose everything through one localhost-only port.
 
 It intentionally does not provide cloud accounts, billing, organization
@@ -91,7 +92,10 @@ Configuration is loaded from `.env` or the process environment.
 | `CAG_HOST` | `127.0.0.1` | Listen address |
 | `CAG_PORT` | `8765` | Unified port |
 | `CAG_MAX_CONCURRENT` | `30` | Request concurrency |
+| `CAG_HTTP_WORKERS` | `64` | Bounded HTTP worker threads |
+| `CAG_HTTP_PENDING` | `128` | Pending HTTP requests before 503 |
 | `CAG_CODEX_POOL_SIZE` | `2` | Reusable Codex processes |
+| `CAG_CODEX_QUEUE_TIMEOUT` | `30` | Maximum Codex pool wait |
 | `CAG_CODEX_CWD` | user home | Default Codex working directory |
 | `CAG_LOG_DIR` | `~/.code-agent-gateway/logs` | Log directory |
 
@@ -117,7 +121,11 @@ curl http://127.0.0.1:8765/metrics
 ```
 
 `/healthz` reports Kimi and Codex separately, including Codex process-pool
-state.
+state, queue wait statistics, Kimi connection-pool state, and circuit status.
+
+Response caching is conservative: only non-streaming requests with
+`temperature: 0` and no tools are cached, and the complete request payload
+participates in the cache key.
 
 ## Architecture
 
@@ -128,6 +136,10 @@ under `gateway/`; the Codex App Server transport lives under
 
 The project has no third-party Python runtime dependency. Source files are
 kept below 200 lines and folders below eight files.
+
+Runtime reload applies limits, cache settings, and thresholds. Listen
+addresses, credentials, upstream endpoints, and HTTP worker sizing require a
+service restart; `/admin/reload` reports such changes explicitly.
 
 ## Security
 

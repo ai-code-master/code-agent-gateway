@@ -30,13 +30,20 @@ class GatewayConfig:
     device_id_path: Path
     client_id: str
     max_concurrent: int
+    http_workers: int
+    http_pending: int
+    http_backlog: int
     rpm_limit: int
     max_retries: int
     backoff_base: float
+    upstream_idle_connections: int
+    circuit_failure_threshold: int
+    circuit_cooldown: int
     refresh_interval: int
     refresh_threshold: int
     upstream_timeout: int
     queue_timeout: int
+    codex_queue_timeout: int
     max_body_size: int
     slow_request_threshold: float
     graceful_shutdown_wait: int
@@ -72,13 +79,20 @@ class GatewayConfig:
             device_id_path=Path(_env("DEVICE_ID_PATH", str(home / ".kimi-code/device_id"))).expanduser(),
             client_id=_env("CLIENT_ID", ""),
             max_concurrent=int(_env("MAX_CONCURRENT", "30")),
+            http_workers=int(_env("HTTP_WORKERS", "64")),
+            http_pending=int(_env("HTTP_PENDING", "128")),
+            http_backlog=int(_env("HTTP_BACKLOG", "128")),
             rpm_limit=int(_env("RPM_LIMIT", "0")),
             max_retries=int(_env("MAX_RETRIES", "2")),
             backoff_base=float(_env("BACKOFF_BASE", "1.0")),
+            upstream_idle_connections=int(_env("UPSTREAM_IDLE_CONNECTIONS", "8")),
+            circuit_failure_threshold=int(_env("CIRCUIT_FAILURE_THRESHOLD", "5")),
+            circuit_cooldown=int(_env("CIRCUIT_COOLDOWN", "30")),
             refresh_interval=int(_env("REFRESH_INTERVAL", "300")),
             refresh_threshold=int(_env("REFRESH_THRESHOLD", "300")),
             upstream_timeout=int(_env("UPSTREAM_TIMEOUT", "600")),
             queue_timeout=int(_env("QUEUE_TIMEOUT", "300")),
+            codex_queue_timeout=int(_env("CODEX_QUEUE_TIMEOUT", "30")),
             max_body_size=int(_env("MAX_BODY_SIZE", str(50 * 1024 * 1024))),
             slow_request_threshold=float(_env("SLOW_REQUEST_THRESHOLD", "30.0")),
             graceful_shutdown_wait=int(_env("GRACEFUL_SHUTDOWN_WAIT", "30")),
@@ -108,14 +122,37 @@ class GatewayConfig:
             raise ValueError("CAG_PORT must be between 1 and 65535")
         if self.max_concurrent < 1:
             raise ValueError("CAG_MAX_CONCURRENT must be positive")
+        if min(
+            self.queue_timeout, self.codex_queue_timeout, self.upstream_timeout
+        ) < 1:
+            raise ValueError("CAG timeouts must be positive")
+        if min(self.http_workers, self.http_pending, self.http_backlog) < 1:
+            raise ValueError("CAG HTTP limits must be positive")
+        if min(
+            self.upstream_idle_connections,
+            self.circuit_failure_threshold,
+            self.circuit_cooldown,
+        ) < 1:
+            raise ValueError("CAG upstream resilience limits must be positive")
 
     def public(self) -> dict:
         return {
             "upstream_base": self.upstream_base,
             "max_concurrent": self.max_concurrent,
+            "http": {
+                "workers": self.http_workers,
+                "pending": self.http_pending,
+                "backlog": self.http_backlog,
+            },
             "rpm_limit": self.rpm_limit,
             "upstream_timeout": self.upstream_timeout,
+            "resilience": {
+                "idle_connections": self.upstream_idle_connections,
+                "circuit_failure_threshold": self.circuit_failure_threshold,
+                "circuit_cooldown": self.circuit_cooldown,
+            },
             "queue_timeout": self.queue_timeout,
+            "codex_queue_timeout": self.codex_queue_timeout,
             "max_body_size": self.max_body_size,
             "slow_request_threshold": self.slow_request_threshold,
             "debug_body": self.debug_body,

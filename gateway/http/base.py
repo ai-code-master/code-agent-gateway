@@ -8,7 +8,10 @@ class ResponseMixin:
     metrics = None
 
     def log_message(self, format, *args):
-        quiet = ("/healthz", "/metrics", "/admin/config", "/admin/reload")
+        quiet = (
+            "/healthz", "/metrics", "/admin/config", "/admin/reload",
+            "/v1/models", "/models",
+        )
         if self.path not in quiet:
             self.logger.info("%s %s -> %s", self.command, self.path, args[1])
 
@@ -66,9 +69,9 @@ class ResponseMixin:
             self.logger.debug("Client disconnected during streaming response")
             self.metrics.record_client_reset()
         finally:
-            response.close()
-            if hasattr(response, "_conn"):
-                response._conn.close()
+            self.context.upstream_client.release(
+                response, reusable=status < 500
+            )
         return sent
 
     def _copy_headers(self, headers):

@@ -5,7 +5,7 @@ import subprocess
 import threading
 
 from .paths import codex
-from .protocol import await_turn, read_lines, send, start_thread
+from .protocol import await_turn, list_models, read_lines, send, start_thread
 
 
 class AppServerProcess:
@@ -33,7 +33,7 @@ class AppServerProcess:
                 "clientInfo": {
                     "name": "code-agent-gateway",
                     "title": "Code Agent Gateway",
-                    "version": "3.1.0",
+                    "version": "3.2.0",
                 },
                 "capabilities": {"experimentalApi": True},
             },
@@ -58,6 +58,10 @@ class AppServerProcess:
             params["effort"] = effort
         send(self.proc, {"method": "turn/start", "id": 2, "params": params})
         return await_turn(self.output, timeout, on_delta)
+
+    def models(self, timeout=8):
+        self.start()
+        return list_models(self.proc, self.output, timeout)
 
     def close(self):
         if not self.proc:

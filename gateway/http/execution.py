@@ -11,22 +11,18 @@ class ExecutionMixin:
     def _execute(self, request):
         context = self.context
         config = context.config()
-        semaphore = context.semaphore()
-        queue_started = time.time()
-        acquired = False
-        try:
-            acquired = semaphore.acquire(timeout=config["queue_timeout"])
-            queue_wait = time.time() - queue_started
-            if not acquired:
-                context.metrics.record_request(
-                    time.time() - request.started_at, 503, queue_wait
-                )
-                return self._send_error(
-                    503,
-                    "Kimi API concurrency limit exceeded, try again later",
-                    {"Retry-After": str(min(120, config["upstream_timeout"]))},
-                )
-            active = context.runtime.begin_request()
+        lease, queue_wait = context.admission.acquire(config["queue_timeout"])
+        if not lease:
+            context.metrics.record_request(
+                time.time() - request.started_at, 503, queue_wait,
+                provider="kimi",
+            )
+            return self._send_error(
+                503,
+                "Gateway concurrency limit exceeded, try again later",
+                {"Retry-After": str(min(120, config["upstream_timeout"]))},
+            )
+        with lease as active:
             context.logger.info(
                 "[%s] %s -> %s %s body=%sb queue_wait=%.2fs active=%s/%s",
                 request.request_id, request.client_ip, request.method, request.path,
@@ -35,10 +31,6 @@ class ExecutionMixin:
             if request.streaming:
                 return self._stream_upstream(request, queue_wait)
             return self._buffer_upstream(request, queue_wait)
-        finally:
-            if acquired:
-                context.runtime.end_request()
-                semaphore.release()
 
     def _provider_request(self, request):
         context = self.context
@@ -47,9 +39,7 @@ class ExecutionMixin:
         )
         if not response or response.status != 401:
             return response, error
-        response.close()
-        if hasattr(response, "_conn"):
-            response._conn.close()
+        context.upstream_client.release(response, reusable=False)
         context.logger.warning("[%s] Upstream 401, refreshing token", request.request_id)
         if not context.token_manager.refresh():
             return None, RuntimeError("Token refresh failed")
@@ -70,7 +60,8 @@ class ExecutionMixin:
         )
         latency = time.time() - request.started_at
         self.context.metrics.record_request(
-            latency, response.status, queue_wait, request.model
+            latency, response.status, queue_wait, request.model,
+            provider="kimi",
         )
         self.context.logger.info(
             "[%s] %s -> %s (stream) latency=%.2fs resp=%sb model=%s",
@@ -83,12 +74,15 @@ class ExecutionMixin:
             response, error = self._provider_request(request)
             if not response:
                 return None, [], b"", error
+            reusable = False
             try:
-                return response.status, response.getheaders(), response.read(), None
+                result = (
+                    response.status, response.getheaders(), response.read(), None
+                )
+                reusable = response.status < 500
+                return result
             finally:
-                response.close()
-                if hasattr(response, "_conn"):
-                    response._conn.close()
+                self.context.upstream_client.release(response, reusable)
 
         try:
             result, coalesced = self.context.single_flight.do(
@@ -112,7 +106,8 @@ class ExecutionMixin:
                 request.path, request.body_json, body, headers, status
             )
         self.context.metrics.record_request(
-            latency, status, queue_wait, request.model, tokens
+            latency, status, queue_wait, request.model, tokens,
+            provider="kimi",
         )
         suffix = " (coalesced)" if coalesced else ""
         log = self.context.logger.warning if latency > config["slow_request_threshold"] else self.context.logger.info
@@ -128,10 +123,9 @@ class ExecutionMixin:
         latency = time.time() - request.started_at
         if error_type == "upstream_timeout":
             self.context.metrics.record_timeout()
-        else:
-            self.context.metrics.record_request(
-                latency, 502, queue_wait, request.model
-            )
+        self.context.metrics.record_request(
+            latency, 502, queue_wait, request.model, provider="kimi"
+        )
         self.context.logger.error(
             "[%s] %s -> 502 (%s): %s",
             request.request_id, request.client_ip, error_type, message,

@@ -117,6 +117,10 @@ class ProxyMixin:
             item for item in self.context.codex_provider.model_records()
             if item["id"] not in existing
         )
+        if records:
+            payload["first_id"] = records[0].get("id")
+            payload["last_id"] = records[-1].get("id")
+        payload["has_more"] = False
         return self._json(200, payload)
 
     def _prepare_body(self, body, request_id, config):
@@ -159,7 +163,9 @@ class ProxyMixin:
         except (BrokenPipeError, ConnectionResetError):
             self.context.logger.debug("Client disconnected during cached response write")
         latency = time.time() - started_at
-        self.context.metrics.record_request(latency, 200, model=model)
+        self.context.metrics.record_request(
+            latency, 200, model=model, provider="kimi"
+        )
         self.context.logger.info(
             "[%s] %s -> 200 (cache_hit) latency=%.2fs model=%s",
             request_id, client_ip, latency, model or "-",
