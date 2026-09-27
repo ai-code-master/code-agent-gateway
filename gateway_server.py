@@ -28,8 +28,6 @@ import json
 import logging
 import os
 import signal
-import socket
-import ssl
 import sys
 import threading
 import time
@@ -39,8 +37,15 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 from gateway.config import GatewayConfig
 from gateway.cache import ModelListCache, ResponseCache, SingleFlight
+from gateway.errors import classify_error
 from gateway.limits import RPMLimiter
 from gateway.metrics import Metrics
+from gateway.request_body import (
+    RequestBodyProcessor,
+    dynamic_max_tokens as _dynamic_max_tokens,
+    estimate_tokens as _estimate_tokens,
+    safe_body_preview as _safe_body_preview,
+)
 
 # ==================== Configuration ====================
 def _env(key, default=""):
@@ -517,163 +522,12 @@ def refresh_worker():
             token_mgr.refresh()
 
 
-# ==================== Error Classification ====================
-def classify_error(e):
-    """Classify an exception into a user-friendly error type."""
-    if isinstance(e, socket.timeout):
-        return "upstream_timeout", "Upstream read timed out (model may be thinking too long)"
-    if isinstance(e, ConnectionResetError):
-        return "connection_reset", "Upstream closed connection unexpectedly"
-    if isinstance(e, BrokenPipeError):
-        return "broken_pipe", "Connection broken while sending request"
-    if isinstance(e, ssl.SSLError):
-        return "ssl_error", f"TLS/SSL error: {e}"
-    if isinstance(e, OSError) and e.errno in (61, 111, 51, 8):
-        return "connection_refused", "Cannot connect to upstream (network or DNS issue)"
-    err_name = type(e).__name__
-    return err_name.lower(), str(e)
-
-
-# ==================== Dynamic max_tokens ====================
-def _estimate_tokens(body_dict: dict) -> int:
-    """Roughly estimate input token count from messages."""
-    messages = body_dict.get("messages", [])
-    if not isinstance(messages, list):
-        return 0
-    total_chars = 0
-    for msg in messages:
-        if isinstance(msg, dict):
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                total_chars += len(content)
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and "text" in part:
-                        total_chars += len(part["text"])
-    # Rough heuristic: 1 token ≈ 1.5 Chinese chars or 4 English chars
-    # Use a blended estimate
-    return total_chars // 2
-
-
-def _dynamic_max_tokens(body_dict: dict) -> int:
-    """Return a max_tokens value based on estimated input size."""
-    est = _estimate_tokens(body_dict)
-    if est < 2000:
-        return 4096
-    if est < 8000:
-        return 8192
-    if est < 16000:
-        return 16384
-    return 32768
-
-
-# ==================== Request Body Helpers ====================
-_THINKING_BUDGET_MAP = {
-    "low": 4000,
-    "medium": 8000,
-    "high": 16000,
-}
-
-
-def _maybe_inject_thinking(body_dict: dict) -> dict:
-    """If client sends reasoning_effort without thinking, inject thinking param."""
-    if not isinstance(body_dict, dict):
-        return body_dict
-    if "thinking" in body_dict:
-        return body_dict
-    effort = body_dict.get("reasoning_effort")
-    if isinstance(effort, str):
-        effort = effort.strip().lower()
-        budget = _THINKING_BUDGET_MAP.get(effort, 8000)
-        body_dict["thinking"] = {"type": "enabled", "budget_tokens": budget}
-        logger.info(f"Injected thinking=budget_tokens:{budget} from reasoning_effort={effort}")
-    return body_dict
-
-
-def _safe_body_preview(body: bytes, max_len: int = 500) -> str:
-    """Return a safe preview of body for debug logging."""
-    return body[:max_len].decode("utf-8", errors="replace")
-
-
-def _truncate_messages(body_dict: dict) -> dict:
-    """Truncate conversation history to reduce input tokens.
-
-    Strategy:
-    1. Keep system messages intact.
-    2. Keep last N user-assistant pairs (configurable via KCP_MAX_HISTORY_PAIRS).
-       When dropping old messages, ensure tool_call_id references remain valid:
-       if a tool message is kept, the assistant message that issued its tool_call
-       must also be kept.
-    3. Truncate very long individual assistant messages.
-    """
-    if not ENABLE_TRUNCATE:
-        return body_dict
-    messages = body_dict.get("messages", [])
-    if not isinstance(messages, list) or len(messages) <= 2:
-        return body_dict
-
-    system_msgs = []
-    conv_msgs = []
-    for msg in messages:
-        if isinstance(msg, dict) and msg.get("role") == "system":
-            system_msgs.append(msg)
-        else:
-            conv_msgs.append(msg)
-
-    # Build map: tool_call_id -> index of assistant message that contains it
-    tool_call_assistant_map = {}
-    for idx, msg in enumerate(conv_msgs):
-        if isinstance(msg, dict) and msg.get("role") == "assistant":
-            for tc in msg.get("tool_calls", []):
-                if isinstance(tc, dict) and "id" in tc:
-                    tool_call_assistant_map[tc["id"]] = idx
-
-    # Keep last N pairs (2 messages per pair)
-    keep_count = max(MAX_HISTORY_PAIRS * 2, 4)  # at least 4 messages
-    truncated_info = ""
-    if len(conv_msgs) > keep_count:
-        start_idx = len(conv_msgs) - keep_count
-        drop_count = start_idx
-
-        # Adjust start_idx backward so that any tool message kept has its
-        # originating assistant message also kept.
-        adjusted = True
-        while adjusted:
-            adjusted = False
-            required_assistants = set()
-            for idx in range(start_idx, len(conv_msgs)):
-                msg = conv_msgs[idx]
-                if isinstance(msg, dict) and msg.get("role") == "tool":
-                    tc_id = msg.get("tool_call_id")
-                    if tc_id and tc_id in tool_call_assistant_map:
-                        ast_idx = tool_call_assistant_map[tc_id]
-                        if ast_idx < start_idx:
-                            required_assistants.add(ast_idx)
-            if required_assistants:
-                start_idx = min(required_assistants)
-                adjusted = True
-
-        drop_count = start_idx
-        conv_msgs = conv_msgs[start_idx:]
-        if drop_count > 0:
-            truncated_info = f" (dropped {drop_count} older messages)"
-
-    # Truncate long assistant messages
-    trunc_count = 0
-    for msg in conv_msgs:
-        if isinstance(msg, dict) and msg.get("role") == "assistant":
-            content = msg.get("content", "")
-            if isinstance(content, str) and len(content) > MAX_ASSISTANT_CHARS:
-                msg["content"] = content[:MAX_ASSISTANT_CHARS] + "\n\n[...truncated by proxy]"
-                trunc_count += 1
-
-    if truncated_info or trunc_count:
-        logger.info(
-            f"Message truncation:{truncated_info} assistant_msgs_truncated={trunc_count} "
-            f"final_count={len(system_msgs) + len(conv_msgs)}"
-        )
-    body_dict["messages"] = system_msgs + conv_msgs
-    return body_dict
+body_processor = RequestBodyProcessor(
+    enabled=lambda: ENABLE_TRUNCATE,
+    max_pairs=lambda: MAX_HISTORY_PAIRS,
+    max_assistant_chars=lambda: MAX_ASSISTANT_CHARS,
+    logger=logger,
+)
 
 # ==================== Core Request Function ====================
 def _do_kimi_request(method, target_url, body, headers, retries=0):
@@ -871,7 +725,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if isinstance(req_json, dict):
                 model_name = req_json.get("model", "")
                 # Truncate long conversation history
-                req_json = _truncate_messages(req_json)
+                req_json = body_processor.truncate_messages(req_json)
                 # Dynamic max_tokens based on estimated input size
                 if "max_tokens" not in req_json:
                     suggested = _dynamic_max_tokens(req_json)
@@ -879,7 +733,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     logger.info(f"[{request_id}] Dynamic max_tokens={suggested} (est_input ~{_estimate_tokens(req_json)} tokens)")
                 else:
                     logger.debug(f"[{request_id}] Preserving max_tokens={req_json['max_tokens']}")
-                req_json = _maybe_inject_thinking(req_json)
+                req_json = body_processor.inject_thinking(req_json)
                 body = json.dumps(req_json).encode("utf-8")
                 body_len = len(body)
         except Exception as e:
