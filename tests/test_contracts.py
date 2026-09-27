@@ -2,7 +2,7 @@
 
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("CAG_CLIENT_ID", "test-client")
 os.environ.setdefault("CAG_CREDENTIALS_PATH", "/tmp/cag-contract-missing.json")
@@ -135,6 +135,20 @@ class PublicRouteTests(unittest.TestCase):
         self.assertEqual(calls[0][0], 200)
         self.assertEqual(calls[0][1]["health"], "/healthz")
         self.assertEqual(calls[0][1]["models"], "/v1/models")
+
+    def test_json_response_treats_broken_pipe_as_client_reset(self):
+        route = RouteMixin()
+        route.send_response = Mock()
+        route.send_header = Mock()
+        route.end_headers = Mock()
+        route.wfile = Mock()
+        route.wfile.write.side_effect = BrokenPipeError
+        route.logger = Mock()
+        route.metrics = Mock()
+
+        route._json(200, {"status": "ok"})
+
+        route.metrics.record_client_reset.assert_called_once_with()
 
 
 if __name__ == "__main__":

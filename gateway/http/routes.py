@@ -68,13 +68,20 @@ class RouteMixin:
 
     def _json(self, status, payload):
         data = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(data)
-        self.wfile.flush()
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(data)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError) as error:
+            self.logger.debug(
+                "Client disconnected during JSON response: %s",
+                type(error).__name__,
+            )
+            self.metrics.record_client_reset()
 
     @staticmethod
     def _features(config):
