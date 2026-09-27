@@ -1,5 +1,5 @@
 #!/bin/bash
-# Quick start script for Kimi Code Proxy
+# Quick start script for Code Agent Gateway
 
 set -e
 
@@ -25,5 +25,5 @@ unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy
 # Reduce memory fragmentation under high-load / large-request scenarios
 export MALLOC_ARENA_MAX=2
 
-echo "Starting Kimi Code Proxy..."
+echo "Starting Code Agent Gateway..."
 exec /opt/homebrew/bin/python3.11 kimi_code_proxy.py

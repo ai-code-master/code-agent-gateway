@@ -1,13 +1,13 @@
-# Kimi Code + Codex WorkBuddy Proxy
+# Code Agent Gateway
 
-A lightweight local HTTP proxy that bridges **OpenAI-compatible clients** (e.g. [Hermes](https://github.com/nousresearch/hermes)) to the **Kimi Code API**.
+A lightweight local gateway that bridges coding agents and other **OpenAI-compatible clients** to multiple AI backends.
 
 The repository also includes a **Codex App Server bridge** for connecting WorkBuddy to a locally authenticated Codex subscription. The two backends run independently:
 
-- Kimi Code: `http://127.0.0.1:8765/v1`
-- Codex for WorkBuddy: `http://127.0.0.1:8766/v1`
+- Kimi-compatible backend: `http://127.0.0.1:8765/v1`
+- Codex bridge: `http://127.0.0.1:8766/v1`
 
-Kimi Code uses OAuth2 + Anthropic Messages API format, which most tools don't speak natively. This proxy handles:
+Provider APIs often use OAuth2 and provider-specific message formats, which most tools don't speak natively. This gateway handles:
 
 - **OAuth token refresh** automatically (no manual token copy-paste)
 - **Protocol translation** — exposes an OpenAI-compatible `/v1/chat/completions` endpoint on `localhost`
@@ -17,14 +17,14 @@ Kimi Code uses OAuth2 + Anthropic Messages API format, which most tools don't sp
 
 ## Why?
 
-Hermes (and many other AI coding assistants) expects an OpenAI-compatible API. Kimi Code speaks Anthropic Messages API and uses OAuth. This proxy sits in the middle so you can use Kimi Code with any OpenAI-compatible tool.
+Hermes, Codex, WorkBuddy and other coding assistants can use one local OpenAI-compatible endpoint while the gateway handles provider authentication and protocol translation.
 
 ```
 Hermes / OpenAI client
        │  OpenAI protocol
        ▼
 ┌──────────────────────┐
-│  Kimi Code Proxy     │  ← this project
+│  Code Agent Gateway  │  ← this project
 │  http://127.0.0.1:8765│
 └──────────────────────┘
        │  Anthropic Messages API + OAuth
@@ -37,8 +37,8 @@ Hermes / OpenAI client
 ### 1. Clone & Configure
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/kimi-code-proxy.git
-cd kimi-code-proxy
+git clone https://github.com/ai-code-master/code-agent-gateway.git
+cd code-agent-gateway
 cp .env.example .env
 # Edit .env and set KCP_CLIENT_ID
 ```
@@ -62,6 +62,10 @@ Or directly:
 ```
 
 The proxy listens on `http://127.0.0.1:8765` by default.
+
+The gateway is intentionally localhost-only. Do not change `KCP_HOST` to
+`0.0.0.0` unless you add authentication, TLS, rate limiting, and a trusted
+network boundary yourself.
 
 ### 4. Configure Your Client
 
