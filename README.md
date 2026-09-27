@@ -165,6 +165,7 @@ launchctl print gui/$(id -u)/io.github.code-agent-gateway
 | `CAG_HTTP_PENDING` | `128` | HTTP 待处理队列上限 |
 | `CAG_CODEX_POOL_SIZE` | `2` | 可复用 Codex 进程数 |
 | `CAG_CODEX_QUEUE_TIMEOUT` | `30` | Codex 进程池等待时间 |
+| `CAG_CODEX_PROXY` | 空 | 仅供 Codex 子进程使用的代理，例如 `http://127.0.0.1:7897` |
 | `CAG_UPSTREAM_TIMEOUT` | `600` | 单次上游请超时 |
 | `CAG_MAX_RETRIES` | `2` | 可重试错误的重试次数 |
 | `CAG_CIRCUIT_FAILURE_THRESHOLD` | `5` | 熔断前的连续失败阈值 |
@@ -373,6 +374,7 @@ Configuration is loaded from `.env` or process environment variables. See
 | `CAG_HTTP_PENDING` | `128` | Pending HTTP queue size |
 | `CAG_CODEX_POOL_SIZE` | `2` | Reusable Codex processes |
 | `CAG_CODEX_QUEUE_TIMEOUT` | `30` | Codex pool wait timeout |
+| `CAG_CODEX_PROXY` | empty | Proxy used only by Codex children, for example `http://127.0.0.1:7897` |
 | `CAG_UPSTREAM_TIMEOUT` | `600` | Per-request upstream timeout |
 | `CAG_MAX_RETRIES` | `2` | Retry count for retryable failures |
 | `CAG_CIRCUIT_FAILURE_THRESHOLD` | `5` | Failures before circuit opening |

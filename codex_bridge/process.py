@@ -1,11 +1,25 @@
 """Reusable Codex App Server child process."""
 
+import os
 import queue
 import subprocess
 import threading
 
 from .paths import codex
 from .protocol import await_turn, list_models, read_lines, send, start_thread
+
+
+def _child_environment():
+    """Build a Codex-only environment without proxying other providers."""
+    env = os.environ.copy()
+    proxy = os.environ.get("CAG_CODEX_PROXY", "").strip()
+    if proxy:
+        for name in (
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+            "http_proxy", "https_proxy", "all_proxy",
+        ):
+            env[name] = proxy
+    return env
 
 
 class AppServerProcess:
@@ -22,6 +36,7 @@ class AppServerProcess:
             [codex(), "app-server", "--listen", "stdio://"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, bufsize=1,
+            env=_child_environment(),
         )
         self.output = queue.Queue()
         threading.Thread(

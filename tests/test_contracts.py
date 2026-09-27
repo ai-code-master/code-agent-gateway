@@ -10,6 +10,7 @@ os.environ.setdefault("CAG_DEVICE_ID_PATH", "/tmp/cag-contract-device")
 os.environ.setdefault("CAG_LOG_DIR", "/tmp/cag-contract-logs")
 
 from codex_bridge.appserver import AppServerPool
+from codex_bridge.process import _child_environment
 from gateway.compat import chat_to_response, responses_to_chat
 from gateway.config import GatewayConfig
 from gateway.provider.health import UpstreamHealth
@@ -90,6 +91,13 @@ class FakeProcess:
 
 
 class ProcessPoolTests(unittest.TestCase):
+    def test_codex_proxy_is_scoped_to_child_environment(self):
+        proxy = "http://127.0.0.1:7897"
+        with patch.dict(os.environ, {"CAG_CODEX_PROXY": proxy}):
+            child_env = _child_environment()
+        self.assertEqual(child_env["HTTPS_PROXY"], proxy)
+        self.assertEqual(child_env["https_proxy"], proxy)
+
     def test_process_is_reused_between_requests(self):
         FakeProcess.starts = 0
         with patch("codex_bridge.appserver.AppServerProcess", FakeProcess):
