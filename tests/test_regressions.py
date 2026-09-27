@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(ROOT, "codex_bridge"))
 import gateway_server as proxy
 from appserver import _await_turn
 from gateway.config import GatewayConfig
+from gateway.provider.codex import CodexProvider
 from gateway.runtime import RuntimeState
 
 
@@ -137,6 +138,17 @@ class HealthTests(unittest.TestCase):
 
 
 class CodexStreamingTests(unittest.TestCase):
+    def test_codex_model_routing_is_explicit(self):
+        self.assertTrue(CodexProvider.handles("codex-sol"))
+        self.assertTrue(CodexProvider.handles("codex/gpt-5.6-sol"))
+        self.assertFalse(CodexProvider.handles("kimi-for-coding"))
+
+    def test_codex_alias_resolves_model_and_effort(self):
+        self.assertEqual(
+            CodexProvider._resolve("codex-terra", None),
+            ("gpt-5.6-terra", "medium"),
+        )
+
     def test_only_final_answer_deltas_are_streamed(self):
         events = queue.Queue()
         messages = [

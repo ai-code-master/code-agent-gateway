@@ -13,6 +13,7 @@ class ProxyContext:
     single_flight: object
     body_processor: object
     upstream_client: object
+    codex_provider: object
     runtime: object
     config: object
     reload: object

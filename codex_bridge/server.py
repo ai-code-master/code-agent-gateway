@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import json
 import os
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from appserver import AppServerError, run_codex
-from catalog import discover
-from chat import build_prompt, detect_cwd, dynamic_tools
-from responses import completion, stream_chunk, stream_common, tool_call_delta
+try:
+    from .appserver import AppServerError, run_codex
+    from .catalog import discover
+    from .chat import build_prompt, detect_cwd, dynamic_tools
+    from .responses import completion, stream_chunk, stream_common, tool_call_delta
+except ImportError:  # direct script compatibility
+    from appserver import AppServerError, run_codex
+    from catalog import discover
+    from chat import build_prompt, detect_cwd, dynamic_tools
+    from responses import completion, stream_chunk, stream_common, tool_call_delta
 
 
 HOST = os.environ.get("CODEX_BRIDGE_HOST", "127.0.0.1")

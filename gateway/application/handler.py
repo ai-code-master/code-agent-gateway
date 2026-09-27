@@ -2,12 +2,14 @@
 
 from http.server import BaseHTTPRequestHandler
 
-from gateway.http import ExecutionMixin, ProxyMixin, ResponseMixin, RouteMixin
+from gateway.http import (
+    CodexMixin, ExecutionMixin, ProxyMixin, ResponseMixin, RouteMixin,
+)
 
 
 def create_handler(application):
     class GatewayHandler(
-        RouteMixin, ProxyMixin, ExecutionMixin, ResponseMixin,
+        RouteMixin, ProxyMixin, CodexMixin, ExecutionMixin, ResponseMixin,
         BaseHTTPRequestHandler,
     ):
         protocol_version = "HTTP/1.1"

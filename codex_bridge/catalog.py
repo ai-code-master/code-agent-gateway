@@ -5,7 +5,10 @@ import subprocess
 import threading
 import time
 
-from paths import codex
+try:
+    from .paths import codex
+except ImportError:  # direct script compatibility
+    from paths import codex
 
 
 def _reader(stream, output):

@@ -2,10 +2,9 @@
 
 A lightweight local gateway that bridges coding agents and other **OpenAI-compatible clients** to multiple AI backends.
 
-The repository also includes a **Codex App Server bridge** for connecting WorkBuddy to a locally authenticated Codex subscription. The two backends run independently:
-
-- Kimi-compatible backend: `http://127.0.0.1:8765/v1`
-- Codex bridge: `http://127.0.0.1:8766/v1`
+Kimi and the locally authenticated Codex App Server are available through one
+OpenAI-compatible endpoint: `http://127.0.0.1:8765/v1`. The requested model
+selects the provider automatically.
 
 Provider APIs often use OAuth2 and provider-specific message formats, which most tools don't speak natively. This gateway handles:
 
@@ -27,9 +26,8 @@ Hermes / OpenAI client
 │  Code Agent Gateway  │  ← this project
 │  http://127.0.0.1:8765│
 └──────────────────────┘
-       │  Anthropic Messages API + OAuth
-       ▼
-   https://api.kimi.com/coding
+       ├─ Kimi models ── OAuth API
+       └─ codex-* / codex/* ── local Codex App Server
 ```
 
 ## Quick Start
@@ -110,11 +108,10 @@ All settings are via environment variables (or `.env` file):
 
 ### Model and executable discovery
 
-The Kimi endpoint keeps the provider's `/v1/models` list. The Codex bridge
-discovers models from the locally installed Codex App Server and exposes them
-as `codex/<model-id>` in addition to the stable aliases above. Discovery is
-best-effort and falls back to the stable aliases when the Codex CLI is not
-available.
+`/v1/models` merges the Kimi provider list with models discovered from the
+installed Codex App Server. Codex models are exposed as `codex/<model-id>` in
+addition to the stable aliases below. Discovery is best-effort and falls back
+to those aliases when the Codex CLI is unavailable.
 
 To override the Codex executable when it is not on `PATH`, set:
 
@@ -132,27 +129,22 @@ Copy the provided plist template and update paths:
 launchctl print gui/$(id -u)/io.github.code-agent-gateway
 ```
 
-Install the Codex bridge separately:
-
-```bash
-./launchd/install-codex.sh
-```
-
-The Codex bridge uses the current `codex login` session and exposes stable
-aliases plus any models discovered from the installed Codex CLI:
+The main gateway uses the current `codex login` session and exposes stable
+aliases plus models discovered from the installed Codex CLI:
 
 - `codex-spark` → `gpt-5.3-codex-spark` with High reasoning by default
 - `codex-sol` → `gpt-5.6-sol` with High reasoning by default
 - `codex-terra` → `gpt-5.6-terra` with Medium reasoning by default
 - `codex-luna` → `gpt-5.6-luna` with Low reasoning by default
 
-It translates WorkBuddy Chat Completions requests and tool definitions to the Codex App Server protocol. The bridge listens on localhost only and does not require an OpenAI API key.
+It translates OpenAI Chat Completions requests and tool definitions to the
+Codex App Server protocol. No separate Codex port or OpenAI API key is needed.
 
 ## Health Check
 
 ```bash
 curl http://127.0.0.1:8765/healthz
-curl http://127.0.0.1:8766/healthz
+curl http://127.0.0.1:8765/v1/models
 ```
 
 ## License

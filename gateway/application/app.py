@@ -7,7 +7,7 @@ from gateway.http import ProxyContext
 from gateway.limits import RPMLimiter
 from gateway.logging_setup import build_logger, install_exception_hook
 from gateway.metrics import Metrics
-from gateway.provider import TokenManager, UpstreamClient, UpstreamHealth
+from gateway.provider import CodexProvider, TokenManager, UpstreamClient, UpstreamHealth
 from gateway.request_body import RequestBodyProcessor
 from gateway.runtime import runtime
 
@@ -58,6 +58,7 @@ class GatewayApplication:
             logger=self.logger,
             metrics=self.metrics,
         )
+        self.codex_provider = CodexProvider(self.logger)
         self.proxy_context = ProxyContext(
             logger=self.logger,
             metrics=self.metrics,
@@ -67,6 +68,7 @@ class GatewayApplication:
             single_flight=self.single_flight,
             body_processor=self.body_processor,
             upstream_client=self.upstream_client,
+            codex_provider=self.codex_provider,
             runtime=self.runtime,
             config=self.public_config,
             reload=self.reload,

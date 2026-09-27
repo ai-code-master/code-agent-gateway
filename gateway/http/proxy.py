@@ -24,11 +24,6 @@ class ProxyMixin:
             return self._json(200, {
                 "status": "reloaded", "config": context.reload()
             })
-        token = context.token_manager.get_token()
-        if not token:
-            context.metrics.record_request(time.time() - started_at)
-            context.logger.warning("[%s] %s -> 401 (no token)", request_id, client_ip)
-            return self._send_error(401, "No Kimi Code token available")
         limiter = context.rate_limiter()
         if not limiter.allow():
             current = limiter.current()
@@ -47,19 +42,31 @@ class ProxyMixin:
                 413, f"Request body too large: {content_length} bytes"
             )
         body = self.rfile.read(content_length) if content_length > 0 else b""
+        path = self._normalized_path()
+        if method == "GET" and path == "/v1/models":
+            return self._send_models(context.token_manager.get_token())
+        try:
+            raw_json = json.loads(body) if body else {}
+        except (ValueError, TypeError):
+            raw_json = {}
+        if (
+            method == "POST"
+            and path in ("/v1/chat/completions", "/chat/completions")
+            and isinstance(raw_json, dict)
+            and context.codex_provider.handles(raw_json.get("model"))
+        ):
+            return self._forward_codex(
+                raw_json, started_at, request_id, client_ip
+            )
+        token = context.token_manager.get_token()
+        if not token:
+            context.metrics.record_request(time.time() - started_at)
+            context.logger.warning("[%s] %s -> 401 (no token)", request_id, client_ip)
+            return self._send_error(401, "No Kimi Code token available")
         if config["debug_body"] and body:
             context.logger.debug(
                 "[%s] Request body preview: %s", request_id, safe_body_preview(body)
             )
-        path = self._normalized_path()
-        if method == "GET" and path == "/v1/models":
-            cached = context.model_cache.get(token)
-            if cached:
-                self._send_response(200, [("Content-Type", "application/json")], cached)
-                context.logger.info(
-                    "[%s] %s -> 200 (model_cache_hit)", request_id, client_ip
-                )
-                return
         target_url = self._target_url(config["upstream_base"], path)
         body, body_json, model = self._prepare_body(body, request_id, config)
         streaming = bool(body_json.get("stream")) if isinstance(body_json, dict) else False
@@ -85,6 +92,25 @@ class ProxyMixin:
             streaming, headers, started_at, client_ip, request_id,
         )
         return self._execute(request)
+
+    def _send_models(self, token):
+        payload = {"object": "list", "data": []}
+        if token:
+            cached = self.context.model_cache.get(token)
+            if cached:
+                try:
+                    payload = json.loads(cached)
+                except (ValueError, TypeError):
+                    payload = {"object": "list", "data": []}
+        records = payload.setdefault("data", [])
+        existing = {
+            item.get("id") for item in records if isinstance(item, dict)
+        }
+        records.extend(
+            item for item in self.context.codex_provider.model_records()
+            if item["id"] not in existing
+        )
+        return self._json(200, payload)
 
     def _prepare_body(self, body, request_id, config):
         model = ""

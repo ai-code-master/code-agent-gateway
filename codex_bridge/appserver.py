@@ -5,7 +5,10 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
-from paths import codex
+try:
+    from .paths import codex
+except ImportError:  # direct script compatibility
+    from paths import codex
 
 
 @dataclass
