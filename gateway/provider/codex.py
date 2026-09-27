@@ -3,7 +3,9 @@
 import threading
 import time
 
-from codex_bridge.appserver import AppServerError, run_codex
+from codex_bridge.appserver import (
+    AppServerError, pool_stats, probe_codex, run_codex,
+)
 from codex_bridge.catalog import discover
 from codex_bridge.chat import build_prompt, detect_cwd, dynamic_tools
 from codex_bridge.responses import completion
@@ -62,6 +64,14 @@ class CodexProvider:
     def complete(self, body, headers):
         result, requested = self.run(body, headers)
         return completion(result, requested)
+
+    @staticmethod
+    def health():
+        return probe_codex()
+
+    @staticmethod
+    def status():
+        return pool_stats()
 
     @staticmethod
     def _resolve(requested, requested_effort):

@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile
+        run: python -m compileall -q gateway codex_bridge gateway_server.py
+      - name: Test
+        run: python -m unittest discover -s tests -v
+      - name: Enforce architecture limits
+        run: |
+          test -z "$(find . -name '*.py' -not -path './.git/*' -exec awk 'FNR==201 {print FILENAME}' {} +)"
+          test -z "$(find . -type d -not -path './.git*' -exec sh -c 'n=$(find "$1" -maxdepth 1 -type f | wc -l); [ "$n" -gt 8 ] && echo "$1: $n"' _ {} \;)"

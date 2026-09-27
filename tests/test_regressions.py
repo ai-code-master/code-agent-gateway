@@ -7,17 +7,16 @@ import time
 import unittest
 
 
-os.environ.setdefault("KCP_CLIENT_ID", "test-client")
-os.environ.setdefault("KCP_CREDENTIALS_PATH", "/tmp/kcp-test-missing-credentials.json")
-os.environ.setdefault("KCP_DEVICE_ID_PATH", "/tmp/kcp-test-missing-device")
-os.environ.setdefault("KCP_LOG_DIR", "/tmp/kcp-test-logs")
+os.environ.setdefault("CAG_CLIENT_ID", "test-client")
+os.environ.setdefault("CAG_CREDENTIALS_PATH", "/tmp/cag-test-missing-credentials.json")
+os.environ.setdefault("CAG_DEVICE_ID_PATH", "/tmp/cag-test-missing-device")
+os.environ.setdefault("CAG_LOG_DIR", "/tmp/cag-test-logs")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "codex_bridge"))
 
 import gateway_server as proxy
-from appserver import _await_turn
+from codex_bridge.appserver import _await_turn
 from gateway.config import GatewayConfig
 from gateway.provider.codex import CodexProvider
 from gateway.runtime import RuntimeState
@@ -26,9 +25,9 @@ from gateway.runtime import RuntimeState
 class CacheTests(unittest.TestCase):
     def setUp(self):
         self.old_cache = proxy.ENABLE_CACHE
-        self.old_semantic = proxy.ENABLE_SEMANTIC_CACHE
+        self.old_equivalence = proxy.ENABLE_EQUIVALENCE_CACHE
         proxy.ENABLE_CACHE = True
-        proxy.ENABLE_SEMANTIC_CACHE = True
+        proxy.ENABLE_EQUIVALENCE_CACHE = True
         self.cache = proxy.ResponseCache(ttl=60, max_entries=10)
         self.base = {
             "model": "k3",
@@ -44,7 +43,7 @@ class CacheTests(unittest.TestCase):
 
     def tearDown(self):
         proxy.ENABLE_CACHE = self.old_cache
-        proxy.ENABLE_SEMANTIC_CACHE = self.old_semantic
+        proxy.ENABLE_EQUIVALENCE_CACHE = self.old_equivalence
 
     def test_normalized_equivalence_hits(self):
         request = {
@@ -55,7 +54,7 @@ class CacheTests(unittest.TestCase):
             ],
         }
         self.assertEqual(
-            self.cache.get_semantic("/v1/chat/completions", request)[0],
+            self.cache.get_equivalent("/v1/chat/completions", request)[0],
             b"answer",
         )
 
@@ -74,14 +73,14 @@ class CacheTests(unittest.TestCase):
                 {"role": "user", "content": "hello world"},
             ],
         }
-        self.assertIsNone(self.cache.get_semantic("/v1/chat/completions", changed))
+        self.assertIsNone(self.cache.get_equivalent("/v1/chat/completions", changed))
         self.assertIsNone(
-            self.cache.get_semantic("/v1/chat/completions", changed_context)
+            self.cache.get_equivalent("/v1/chat/completions", changed_context)
         )
 
 
 class GatewayBoundaryTests(unittest.TestCase):
-    def test_config_reads_legacy_environment_contract(self):
+    def test_config_reads_gateway_environment_contract(self):
         config = GatewayConfig.from_env()
         self.assertEqual(config.client_id, "test-client")
         self.assertEqual(config.host, "127.0.0.1")

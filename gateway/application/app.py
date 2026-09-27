@@ -20,7 +20,7 @@ class GatewayApplication:
     def __init__(self, base_dir):
         self.settings = SettingsStore(base_dir)
         config = self.settings.current
-        log_file = config.log_dir / "kimi-proxy.log"
+        log_file = config.log_dir / "code-agent-gateway.log"
         self.logger = build_logger(
             str(config.log_dir), str(log_file), config.log_max_bytes,
             config.log_backup_count, config.log_dir_max_bytes,
@@ -35,15 +35,17 @@ class GatewayApplication:
             ttl=config.cache_ttl,
             max_entries=config.cache_max_entries,
             enabled=lambda: self.settings.current.enable_cache,
-            semantic_enabled=lambda: self.settings.current.enable_semantic_cache,
+            equivalence_enabled=lambda: self.settings.current.enable_equivalence_cache,
         )
         self.single_flight = SingleFlight(
             enabled=lambda: self.settings.current.enable_single_flight,
             timeout=lambda: self.settings.current.single_flight_timeout,
         )
         self.token_manager = self._token_manager()
+        self.codex_provider = CodexProvider(self.logger)
         self.upstream_health = UpstreamHealth(
-            self.token_manager, config.upstream_base, self.logger
+            self.token_manager, config.upstream_base, self.logger,
+            codex_probe=self.codex_provider.health,
         )
         self.body_processor = RequestBodyProcessor(
             enabled=lambda: self.settings.current.enable_truncate,
@@ -58,7 +60,6 @@ class GatewayApplication:
             logger=self.logger,
             metrics=self.metrics,
         )
-        self.codex_provider = CodexProvider(self.logger)
         self.proxy_context = ProxyContext(
             logger=self.logger,
             metrics=self.metrics,

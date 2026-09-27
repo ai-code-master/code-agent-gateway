@@ -13,12 +13,6 @@ if [ -f .env ]; then
     set +a
 fi
 
-# Validate required env
-if [ -z "$KCP_CLIENT_ID" ]; then
-    echo "ERROR: KCP_CLIENT_ID is not set. Please configure .env file."
-    exit 1
-fi
-
 # Force direct connection — never depend on Clash or any system proxy
 unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy
 

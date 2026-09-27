@@ -87,6 +87,8 @@ class TokenManager:
     def should_refresh(self):
         with self._lock:
             self._maybe_reload()
+            if not self._client_id or not self._data.get("refresh_token"):
+                return False
             remaining = self._data.get("expires_at", 0) - time.time()
             return remaining < self._refresh_threshold()
 

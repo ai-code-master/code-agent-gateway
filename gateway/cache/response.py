@@ -8,15 +8,15 @@ import time
 
 class ResponseCache:
     def __init__(self, ttl=300, max_entries=100, enabled=lambda: True,
-                 semantic_enabled=lambda: True):
+                 equivalence_enabled=lambda: True):
         self._ttl = ttl
         self._max_entries = max_entries
         self._enabled = enabled
-        self._semantic_enabled = semantic_enabled
+        self._equivalence_enabled = equivalence_enabled
         self._lock = threading.Lock()
         self._cache = {}
         self._signatures = {}
-        self._hit_count = self._miss_count = self._semantic_hit_count = 0
+        self._hit_count = self._miss_count = self._equivalence_hit_count = 0
 
     def _make_key(self, path, body):
         if not self._enabled() or path not in (
@@ -67,16 +67,16 @@ class ResponseCache:
             self._hit_count += 1
             return data, headers
 
-    def get_semantic(self, path, body):
+    def get_equivalent(self, path, body):
         result = self.get(path, body, count_miss=False)
         if result:
             return result
-        if not self._semantic_enabled():
+        if not self._equivalence_enabled():
             with self._lock:
                 self._miss_count += 1
             return None
         key = self._make_key(path, body)
-        signature = self._semantic_signature(body) if key else None
+        signature = self._equivalence_signature(body) if key else None
         if not signature:
             return None
         with self._lock:
@@ -85,13 +85,13 @@ class ResponseCache:
                 if cached_key not in self._cache:
                     continue
                 if now <= self._cache[cached_key][0] and cached_signature == signature:
-                    self._semantic_hit_count += 1
+                    self._equivalence_hit_count += 1
                     self._hit_count += 1
                     return self._cache[cached_key][1], self._cache[cached_key][2]
             self._miss_count += 1
         return None
 
-    def _semantic_signature(self, body):
+    def _equivalence_signature(self, body):
         query = self._last_user_message(body)
         if not query:
             return None
@@ -118,19 +118,19 @@ class ResponseCache:
             filtered = [(key, value) for key, value in headers
                         if key.lower() == "content-type"]
             self._cache[key] = (time.time() + self._ttl, data, filtered)
-            self._signatures[key] = self._semantic_signature(body)
+            self._signatures[key] = self._equivalence_signature(body)
 
     def stats(self):
         with self._lock:
             total = self._hit_count + self._miss_count
             return {
                 "enabled": self._enabled(),
-                "semantic_enabled": self._semantic_enabled(),
+                "equivalence_enabled": self._equivalence_enabled(),
                 "entries": len(self._cache),
                 "ttl": self._ttl,
                 "max_entries": self._max_entries,
                 "hit_count": self._hit_count,
-                "semantic_hits": self._semantic_hit_count,
+                "equivalence_hits": self._equivalence_hit_count,
                 "miss_count": self._miss_count,
                 "hit_rate": round(self._hit_count / total, 4) if total else 0.0,
             }
@@ -139,7 +139,7 @@ class ResponseCache:
         with self._lock:
             self._cache.clear()
             self._signatures.clear()
-            self._hit_count = self._semantic_hit_count = self._miss_count = 0
+            self._hit_count = self._equivalence_hit_count = self._miss_count = 0
 
     def configure(self, ttl, max_entries):
         with self._lock:

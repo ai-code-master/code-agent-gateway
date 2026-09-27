@@ -5,6 +5,8 @@ import threading
 import time
 from http.server import ThreadingHTTPServer
 
+from codex_bridge.appserver import shutdown_pool
+
 
 def run(application):
     def handle_signal(signum, _frame):
@@ -38,13 +40,15 @@ def run(application):
     else:
         application.logger.info("All active requests completed, shutdown cleanly")
     server_thread.join(timeout=5)
+    shutdown_pool()
     application.logger.info("Shutdown complete")
 
 
 def _log_startup(application):
     config = application.settings.current
     log = application.logger.info
-    log("Code Agent Gateway v3.0 started")
+    log("Code Agent Gateway v3.1 started")
+    log("  Purpose: expose local AI coding subscriptions as OpenAI-compatible APIs")
     log("  Listen: http://%s:%s", config.host, config.port)
     log("  Upstream: %s", config.upstream_base)
     log("  Concurrent: %s, RPM limit: %s", config.max_concurrent, config.rpm_limit)

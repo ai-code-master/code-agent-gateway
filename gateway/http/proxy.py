@@ -17,7 +17,7 @@ class ProxyMixin:
         config = context.config()
         started_at = time.time()
         client_ip = self._client_ip()
-        request_id = self.headers.get("x-request-id") or f"kp-{uuid.uuid4().hex[:12]}"
+        request_id = self.headers.get("x-request-id") or f"cag-{uuid.uuid4().hex[:12]}"
         if self.path == "/admin/config":
             return self._json(200, config)
         if self.path == "/admin/reload":
@@ -50,6 +50,13 @@ class ProxyMixin:
         except (ValueError, TypeError):
             raw_json = {}
         if (
+            method == "POST" and path == "/v1/responses"
+            and isinstance(raw_json, dict)
+        ):
+            return self._forward_responses(
+                raw_json, started_at, request_id, client_ip
+            )
+        if (
             method == "POST"
             and path in ("/v1/chat/completions", "/chat/completions")
             and isinstance(raw_json, dict)
@@ -71,7 +78,7 @@ class ProxyMixin:
         body, body_json, model = self._prepare_body(body, request_id, config)
         streaming = bool(body_json.get("stream")) if isinstance(body_json, dict) else False
         if method == "POST" and body_json:
-            cached = context.response_cache.get_semantic(path, body_json)
+            cached = context.response_cache.get_equivalent(path, body_json)
             if cached:
                 return self._cached_response(
                     cached, started_at, request_id, client_ip, model

@@ -22,21 +22,25 @@ class RouteMixin:
 
     def _health(self):
         upstream_ok = self.upstream_health.is_healthy()
+        ready = self.upstream_health.is_ready()
         config = self.current_config()
         payload = {
-            "status": "ok" if upstream_ok else "degraded",
+            "status": "ok" if upstream_ok else ("degraded" if ready else "unavailable"),
+            "ready": ready,
             "upstream_healthy": upstream_ok,
-            "version": "3.0",
+            "providers": self.upstream_health.provider_status(),
+            "version": "3.1",
             **self.token_manager.status(),
             "concurrent_limit": config["max_concurrent"],
             "concurrent_active": self.active_requests(),
             "cache": self.response_cache.stats(),
             "truncation": config["truncation"],
             "single_flight": config["single_flight"],
-            "semantic_cache": config["semantic_cache"],
+            "equivalence_cache": config["equivalence_cache"],
             "features": self._features(config),
         }
-        self._json(200 if upstream_ok else 503, payload)
+        payload["codex_pool"] = self.codex_provider.status()
+        self._json(200 if ready else 503, payload)
 
     def _metrics(self):
         config = self.current_config()
@@ -45,7 +49,7 @@ class RouteMixin:
             "cache": self.response_cache.stats(),
             "truncation": config["truncation"],
             "single_flight": config["single_flight"],
-            "semantic_cache": config["semantic_cache"],
+            "equivalence_cache": config["equivalence_cache"],
         })
         self._json(200, payload)
 
@@ -74,7 +78,7 @@ class RouteMixin:
             (config["cache"]["enabled"], "response_cache"),
             (config["truncation"]["enabled"], "message_truncation"),
             (config["single_flight"]["enabled"], "single_flight"),
-            (config["semantic_cache"]["enabled"], "semantic_cache"),
+            (config["equivalence_cache"]["enabled"], "equivalence_cache"),
         )
         features.extend(name for enabled, name in flags if enabled)
         return features

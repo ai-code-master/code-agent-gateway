@@ -1,172 +1,117 @@
-import json
+"""Persistent pool for the locally authenticated Codex App Server."""
+
+import os
 import queue
-import subprocess
 import threading
-import time
-from dataclasses import dataclass
-from typing import Optional
-try:
-    from .paths import codex
-except ImportError:  # direct script compatibility
-    from paths import codex
+
+from .process import AppServerProcess
+from .protocol import AppServerError, await_turn as _await_turn
 
 
-@dataclass
-class RunResult:
-    content: str = ""
-    tool_call: Optional[dict] = None
+class AppServerPool:
+    def __init__(self, size):
+        self.size = max(1, size)
+        self._available = queue.LifoQueue()
+        self._all = []
+        self._lock = threading.Lock()
 
-
-class AppServerError(RuntimeError):
-    pass
-
-
-def _reader(stream, output):
-    for line in stream:
-        output.put(line)
-    output.put(None)
-
-
-def _send(proc, payload):
-    proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    proc.stdin.flush()
-
-
-def run_codex(
-    prompt, cwd, tools=None, effort=None, model=None, timeout=900, on_delta=None
-):
-    proc = subprocess.Popen(
-        [codex(), "app-server", "--listen", "stdio://"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-    output = queue.Queue()
-    errors = queue.Queue()
-    threading.Thread(target=_reader, args=(proc.stdout, output), daemon=True).start()
-    threading.Thread(target=_reader, args=(proc.stderr, errors), daemon=True).start()
-    try:
-        _handshake(proc)
-        thread_id = _start_thread(proc, output, cwd, tools, model, timeout)
-        params = {
-            "threadId": thread_id,
-            "input": [{"type": "text", "text": prompt}],
-        }
-        if effort in {"minimal", "low", "medium", "high", "xhigh", "max"}:
-            params["effort"] = effort
-        _send(proc, {"method": "turn/start", "id": 2, "params": params})
-        return _await_turn(output, timeout, on_delta)
-    finally:
-        proc.terminate()
+    def run(self, *args, **kwargs):
+        process = self._acquire(kwargs.get("timeout", 900))
+        healthy = True
         try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+            return process.run(*args, **kwargs)
+        except Exception:
+            healthy = False
+            raise
+        finally:
+            self._release(process, healthy)
+
+    def probe(self):
+        process = self._acquire(10)
+        try:
+            process.start()
+            return process.alive
+        finally:
+            self._release(process, process.alive)
+
+    def stats(self):
+        with self._lock:
+            return {
+                "size": self.size,
+                "processes": len(self._all),
+                "idle": self._available.qsize(),
+                "healthy": sum(item.alive for item in self._all),
+            }
+
+    def close(self):
+        with self._lock:
+            processes, self._all = self._all, []
+        for process in processes:
+            process.close()
+
+    def _acquire(self, timeout):
+        try:
+            process = self._available.get_nowait()
+        except queue.Empty:
+            with self._lock:
+                if len(self._all) < self.size:
+                    process = AppServerProcess()
+                    self._all.append(process)
+                    return process
+            try:
+                process = self._available.get(timeout=timeout)
+            except queue.Empty as error:
+                raise AppServerError("Codex process pool is busy") from error
+        if process.alive or process.proc is None:
+            return process
+        self._discard(process)
+        return self._acquire(timeout)
+
+    def _release(self, process, healthy):
+        if healthy and (process.alive or process.proc is None):
+            self._available.put(process)
+        else:
+            self._discard(process)
+
+    def _discard(self, process):
+        process.close()
+        with self._lock:
+            if process in self._all:
+                self._all.remove(process)
 
 
-def _handshake(proc):
-    _send(proc, {
-        "method": "initialize",
-        "id": 0,
-        "params": {
-            "clientInfo": {
-                "name": "workbuddy_codex_bridge",
-                "title": "WorkBuddy Codex Bridge",
-                "version": "0.2.0",
-            },
-            "capabilities": {"experimentalApi": True},
-        },
-    })
-    _send(proc, {"method": "initialized", "params": {}})
+_POOL = None
+_POOL_LOCK = threading.Lock()
 
 
-def _start_thread(proc, output, cwd, tools, model, timeout):
-    params = {
-        "cwd": cwd,
-        "approvalPolicy": "never",
-        "sandbox": "read-only",
-        "ephemeral": True,
-        "serviceName": "workbuddy_codex_bridge",
-    }
-    if tools:
-        params["dynamicTools"] = tools
-    if model:
-        params["model"] = model
-    _send(proc, {"method": "thread/start", "id": 1, "params": params})
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        msg = _next(output, deadline)
-        if msg.get("id") == 1:
-            _raise_error(msg)
-            thread_id = msg.get("result", {}).get("thread", {}).get("id")
-            if not thread_id:
-                raise AppServerError("thread/start did not return a thread id")
-            return thread_id
-    raise AppServerError("thread/start timed out")
+def _pool():
+    global _POOL
+    with _POOL_LOCK:
+        if _POOL is None:
+            raw = os.environ.get("CAG_CODEX_POOL_SIZE", "2")
+            _POOL = AppServerPool(int(raw))
+        return _POOL
 
 
-def _await_turn(output, timeout, on_delta=None):
-    deadline = time.monotonic() + timeout
-    final_messages = []
-    unknown_messages = []
-    phases = {}
-    streamed_ids = set()
-    while time.monotonic() < deadline:
-        msg = _next(output, deadline)
-        if msg.get("id") == 2:
-            _raise_error(msg)
-        if msg.get("method") == "item/tool/call":
-            params = msg.get("params", {})
-            return RunResult(tool_call={
-                "id": params.get("callId"),
-                "name": params.get("tool"),
-                "arguments": params.get("arguments", {}),
-            })
-        if msg.get("method") == "item/started":
-            item = msg.get("params", {}).get("item", {})
-            if item.get("type") == "agentMessage":
-                phases[item.get("id")] = item.get("phase")
-        if msg.get("method") == "item/agentMessage/delta":
-            params = msg.get("params", {})
-            item_id = params.get("itemId")
-            delta = params.get("delta", "")
-            if on_delta and delta and phases.get(item_id) == "final_answer":
-                on_delta(delta)
-                streamed_ids.add(item_id)
-        if msg.get("method") == "item/completed":
-            item = msg.get("params", {}).get("item", {})
-            if item.get("type") == "agentMessage":
-                target = final_messages if item.get("phase") == "final_answer" else unknown_messages
-                text = item.get("text", "")
-                target.append(text)
-                if on_delta and text and item.get("phase") == "final_answer":
-                    if item.get("id") not in streamed_ids:
-                        on_delta(text)
-        if msg.get("method") == "turn/completed":
-            turn = msg.get("params", {}).get("turn", {})
-            if turn.get("status") == "failed":
-                raise AppServerError(str(turn.get("error") or "Codex turn failed"))
-            content = "\n".join(x for x in (final_messages or unknown_messages) if x)
-            return RunResult(content=content)
-    raise AppServerError("Codex turn timed out")
+def run_codex(prompt, cwd, tools=None, effort=None, model=None,
+              timeout=900, on_delta=None):
+    return _pool().run(
+        prompt, cwd, tools=tools, effort=effort, model=model,
+        timeout=timeout, on_delta=on_delta,
+    )
 
 
-def _next(output, deadline):
-    wait = max(0.1, min(1.0, deadline - time.monotonic()))
+def probe_codex():
     try:
-        line = output.get(timeout=wait)
-    except queue.Empty:
-        return {}
-    if line is None:
-        raise AppServerError("Codex app-server exited unexpectedly")
-    try:
-        return json.loads(line)
-    except json.JSONDecodeError:
-        return {}
+        return _pool().probe()
+    except Exception:
+        return False
 
 
-def _raise_error(message):
-    if message.get("error"):
-        raise AppServerError(message["error"].get("message", str(message["error"])))
+def pool_stats():
+    return _pool().stats()
+
+
+def shutdown_pool():
+    if _POOL is not None:
+        _POOL.close()

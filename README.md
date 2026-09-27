@@ -1,151 +1,139 @@
 # Code Agent Gateway
 
-A lightweight local gateway that bridges coding agents and other **OpenAI-compatible clients** to multiple AI backends.
+Turn AI coding subscriptions already signed in on your computer into one
+OpenAI-compatible local API.
 
-Kimi and the locally authenticated Codex App Server are available through one
-OpenAI-compatible endpoint: `http://127.0.0.1:8765/v1`. The requested model
-selects the provider automatically.
+The gateway reuses local Kimi Code and Codex sessions. Clients such as Hermes
+only need one endpoint:
 
-Provider APIs often use OAuth2 and provider-specific message formats, which most tools don't speak natively. This gateway handles:
-
-- **OAuth token refresh** automatically (no manual token copy-paste)
-- **Protocol translation** — exposes an OpenAI-compatible `/v1/chat/completions` endpoint on `localhost`
-- **Concurrency control** — caps parallel upstream requests and coalesces identical calls
-- **True streaming** — forwards Kimi and Codex output incrementally
-- **Transparent failover** — retries on 502/429/503 with exponential backoff
-
-## Why?
-
-Hermes, Codex, WorkBuddy and other coding assistants can use one local OpenAI-compatible endpoint while the gateway handles provider authentication and protocol translation.
-
-```
-Hermes / OpenAI client
-       │  OpenAI protocol
-       ▼
-┌──────────────────────┐
-│  Code Agent Gateway  │  ← this project
-│  http://127.0.0.1:8765│
-└──────────────────────┘
-       ├─ Kimi models ── OAuth API
-       └─ codex-* / codex/* ── local Codex App Server
+```text
+Hermes / OpenAI-compatible client
+                 |
+                 v
+http://127.0.0.1:8765/v1
+                 |
+          +------+------+
+          |             |
+     Kimi Code       Codex CLI
+     OAuth session   login session
 ```
 
-## Quick Start
+## Scope
 
-### 1. Clone & Configure
+This project is a local coding-subscription adapter, not an enterprise AI
+control plane. Its priorities are:
+
+- discover locally installed coding agents and their models;
+- reuse local login sessions without copying short-lived access tokens;
+- translate provider protocols to OpenAI-compatible APIs;
+- keep provider processes healthy and reusable;
+- expose everything through one localhost-only port.
+
+It intentionally does not provide cloud accounts, billing, organization
+management, or LAN access.
+
+## Supported APIs
+
+| Endpoint | Kimi Code | Codex |
+|---|---:|---:|
+| `GET /v1/models` | Yes | Yes |
+| `POST /v1/chat/completions` | Yes | Yes |
+| `POST /v1/responses` | No | Yes |
+| Streaming | Yes | Yes |
+| Function tools | Pass-through | Translated |
+
+The requested model selects the provider automatically. Codex models are
+available as stable aliases such as `codex-sol` and as discovered
+`codex/<model-id>` names.
+
+## Quick start
 
 ```bash
 git clone https://github.com/ai-code-master/code-agent-gateway.git
 cd code-agent-gateway
 cp .env.example .env
-# Edit .env and set KCP_CLIENT_ID
-```
-
-### 2. Get OAuth Credentials
-
-You need a valid Kimi Code OAuth token. The proxy reads it from `~/.kimi-code/credentials/kimi-code.json` (same format as the official Kimi CLI).
-
-If you already use [Kimi CLI](https://kimi.com), the credentials file usually exists.
-
-### 3. Run
-
-```bash
+# Set CAG_CLIENT_ID when using Kimi Code
 ./start.sh
 ```
 
-Or directly:
+Kimi credentials are read from
+`~/.kimi-code/credentials/kimi-code.json`. Codex is discovered from `PATH`
+and uses the current `codex login` session. Override the executable with
+`CODEX_BIN=/absolute/path/to/codex` when needed.
+
+## Hermes
+
+Hermes speaks the OpenAI API but does not directly manage the Kimi Code OAuth
+session. Point it at the gateway:
 
 ```bash
-python3 gateway_server.py
+export OPENAI_BASE_URL=http://127.0.0.1:8765/v1
+export OPENAI_API_KEY=local-gateway
 ```
 
-The proxy listens on `http://127.0.0.1:8765` by default.
-
-The gateway is intentionally localhost-only. Do not change `KCP_HOST` to
-`0.0.0.0` unless you add authentication, TLS, rate limiting, and a trusted
-network boundary yourself.
-
-### Architecture
-
-`gateway_server.py` is a thin compatibility entrypoint. Implementation is
-split by responsibility under `gateway/`: application lifecycle and wiring,
-HTTP handling, provider authentication and transport, caching, metrics,
-logging, rate limiting, and request normalization. Python source files are
-kept below 200 lines so provider integrations can evolve independently.
-
-### 4. Configure Your Client
-
-Point your client to the proxy:
-
-```bash
-export OPENAI_BASE_URL=http://127.0.0.1:8765
-export OPENAI_API_KEY=kimi-code-oauth   # any non-empty string works
-```
-
-For **Hermes**, add to `~/.hermes/.env`:
+For Hermes installations using Kimi-specific variable names:
 
 ```bash
 KIMI_BASE_URL=http://127.0.0.1:8765
-KIMI_API_KEY=kimi-code-oauth
+KIMI_API_KEY=local-gateway
 ```
+
+The API key value is ignored because the service only listens on localhost.
 
 ## Configuration
 
-All settings are via environment variables (or `.env` file):
+Configuration is loaded from `.env` or the process environment.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `KCP_CLIENT_ID` | *(required)* | OAuth client ID |
-| `KCP_CREDENTIALS_PATH` | `~/.kimi-code/credentials/kimi-code.json` | Path to Kimi OAuth credentials |
-| `KCP_DEVICE_ID_PATH` | `~/.kimi-code/device_id` | Path to device ID file |
-| `KCP_AUTH_ENDPOINT` | `https://auth.kimi.com/api/oauth/token` | OAuth token endpoint |
-| `KCP_UPSTREAM_BASE` | `https://api.kimi.com/coding` | Kimi Code API base URL |
-| `KCP_HOST` | `127.0.0.1` | Proxy listen host |
-| `KCP_PORT` | `8765` | Proxy listen port |
-| `KCP_MAX_CONCURRENT` | `30` | Max concurrent upstream requests |
-| `KCP_LOG_DIR` | `~/.hermes/logs` | Log directory |
-| `KCP_DEVICE_NAME` | `CodeAgentGateway` | Override to hide real device name |
+| Variable | Default | Purpose |
+|---|---|---|
+| `CAG_CLIENT_ID` | empty | Kimi Code OAuth refresh client ID |
+| `CAG_CREDENTIALS_PATH` | Kimi CLI credentials | Kimi login session |
+| `CAG_HOST` | `127.0.0.1` | Listen address |
+| `CAG_PORT` | `8765` | Unified port |
+| `CAG_MAX_CONCURRENT` | `30` | Request concurrency |
+| `CAG_CODEX_POOL_SIZE` | `2` | Reusable Codex processes |
+| `CAG_CODEX_CWD` | user home | Default Codex working directory |
+| `CAG_LOG_DIR` | `~/.code-agent-gateway/logs` | Log directory |
 
-### Model and executable discovery
+See [`.env.example`](.env.example) for cache, timeout, logging, and device
+settings.
 
-`/v1/models` merges the Kimi provider list with models discovered from the
-installed Codex App Server. Codex models are exposed as `codex/<model-id>` in
-addition to the stable aliases below. Discovery is best-effort and falls back
-to those aliases when the Codex CLI is unavailable.
-
-To override the Codex executable when it is not on `PATH`, set:
-
-```bash
-export CODEX_BIN=/absolute/path/to/codex
-```
-
-## Run as macOS Service (launchd)
-
-Copy the provided plist template and update paths:
+## macOS service
 
 ```bash
 ./launchd/install.sh
-# Edit the plist to set the correct WorkingDirectory and ProgramArguments
 launchctl print gui/$(id -u)/io.github.code-agent-gateway
 ```
 
-The main gateway uses the current `codex login` session and exposes stable
-aliases plus models discovered from the installed Codex CLI:
+Only the unified `8765` service is installed. Codex App Server child
+processes are owned and reused by the gateway.
 
-- `codex-spark` → `gpt-5.3-codex-spark` with High reasoning by default
-- `codex-sol` → `gpt-5.6-sol` with High reasoning by default
-- `codex-terra` → `gpt-5.6-terra` with Medium reasoning by default
-- `codex-luna` → `gpt-5.6-luna` with Low reasoning by default
-
-It translates OpenAI Chat Completions requests and tool definitions to the
-Codex App Server protocol. No separate Codex port or OpenAI API key is needed.
-
-## Health Check
+## Health and diagnostics
 
 ```bash
 curl http://127.0.0.1:8765/healthz
 curl http://127.0.0.1:8765/v1/models
+curl http://127.0.0.1:8765/metrics
 ```
+
+`/healthz` reports Kimi and Codex separately, including Codex process-pool
+state.
+
+## Architecture
+
+`gateway_server.py` is a thin entrypoint. Runtime composition, HTTP
+delivery, protocol adapters, provider integrations, and caches are separated
+under `gateway/`; the Codex App Server transport lives under
+`codex_bridge/`.
+
+The project has no third-party Python runtime dependency. Source files are
+kept below 200 lines and folders below eight files.
+
+## Security
+
+The gateway deliberately binds to `127.0.0.1`. Do not expose it on a LAN or
+the public internet: it reuses authenticated local subscriptions and does not
+implement inbound user authentication.
 
 ## License
 

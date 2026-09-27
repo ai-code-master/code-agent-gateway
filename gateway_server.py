@@ -17,7 +17,7 @@ except ValueError as error:
 
 ProxyHandler = application.handler
 ENABLE_CACHE = application.settings.current.enable_cache
-ENABLE_SEMANTIC_CACHE = application.settings.current.enable_semantic_cache
+ENABLE_EQUIVALENCE_CACHE = application.settings.current.enable_equivalence_cache
 ENABLE_SINGLE_FLIGHT = application.settings.current.enable_single_flight
 
 

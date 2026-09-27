@@ -16,14 +16,14 @@ def _text(content):
         if item.get("type") in ("text", "input_text"):
             parts.append(item.get("text", ""))
         elif item.get("type") in ("image_url", "input_image"):
-            parts.append("[图像输入由 WorkBuddy 提供]")
+            parts.append("[图像输入由客户端提供]")
     return "\n".join(parts)
 
 
 def build_prompt(messages):
     blocks = [
-        "你是嵌入 WorkBuddy 的 Codex 执行引擎。",
-        "完整遵循下面的对话与系统要求。需要外部操作时，优先调用 workbuddy 命名空间工具。",
+        "你是通过 Code Agent Gateway 调用的 Codex 执行引擎。",
+        "完整遵循下面的对话与系统要求。需要外部操作时，优先调用 client_tools 命名空间工具。",
         "这是截至当前请求的完整对话记录；已有 tool 消息就是已完成工具调用的真实结果，不要重复同一调用。",
         "不要解释桥接机制；直接完成用户任务。",
     ]
@@ -55,15 +55,15 @@ def dynamic_tools(tools):
         converted.append({
             "type": "function",
             "name": name,
-            "description": fn.get("description") or f"WorkBuddy tool {name}",
+            "description": fn.get("description") or f"Client tool {name}",
             "inputSchema": fn.get("parameters") or {"type": "object"},
         })
     if not converted:
         return None
     return [{
         "type": "namespace",
-        "name": "workbuddy",
-        "description": "Tools supplied by the WorkBuddy host application.",
+        "name": "client_tools",
+        "description": "Tools supplied by the connected OpenAI-compatible client.",
         "tools": converted,
     }]
 
@@ -85,8 +85,8 @@ def detect_cwd(messages, headers):
         match = re.search(pattern, joined, re.IGNORECASE)
         if match and _valid_dir(match.group(1).strip()):
             return match.group(1).strip()
-    fallback = os.environ.get("CODEX_BRIDGE_CWD", "/Users/YOUR_USERNAME/Documents")
-    return fallback if _valid_dir(fallback) else "/Users/YOUR_USERNAME/Documents"
+    fallback = os.environ.get("CAG_CODEX_CWD", str(Path.home()))
+    return fallback if _valid_dir(fallback) else str(Path.home())
 
 
 def _valid_dir(value):
