@@ -30,7 +30,7 @@ def send(proc, payload):
 
 def start_thread(proc, output, cwd, tools, model, timeout):
     params = {
-        "cwd": cwd, "approvalPolicy": "never", "sandbox": "read-only",
+        "cwd": cwd,
         "ephemeral": True, "serviceName": "code-agent-gateway",
     }
     if tools:

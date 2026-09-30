@@ -11,6 +11,7 @@ os.environ.setdefault("CAG_LOG_DIR", "/tmp/cag-contract-logs")
 
 from codex_bridge.appserver import AppServerPool
 from codex_bridge.process import _child_environment
+from codex_bridge.protocol import start_thread
 from gateway.compat import chat_to_response, responses_to_chat
 from gateway.config import GatewayConfig
 from gateway.http.routes import RouteMixin
@@ -92,6 +93,19 @@ class FakeProcess:
 
 
 class ProcessPoolTests(unittest.TestCase):
+    def test_codex_thread_inherits_local_permissions(self):
+        with patch("codex_bridge.protocol.send") as send, patch(
+            "codex_bridge.protocol.next_message",
+            return_value={"id": 1, "result": {"thread": {"id": "thread-1"}}},
+        ):
+            self.assertEqual(
+                start_thread(Mock(), Mock(), "/tmp", None, None, 1),
+                "thread-1",
+            )
+        params = send.call_args.args[1]["params"]
+        self.assertNotIn("sandbox", params)
+        self.assertNotIn("approvalPolicy", params)
+
     def test_codex_proxy_is_scoped_to_child_environment(self):
         proxy = "http://127.0.0.1:7897"
         with patch.dict(os.environ, {"CAG_CODEX_PROXY": proxy}):

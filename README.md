@@ -208,7 +208,7 @@ v3.2 本地 loopback 实测：
 - `.env`、JSON 凭据、日志和 Python 缓存均被 Git 忽略。
 - 凭据仅从用户本机读取，不会被复制到项目仓库。
 - 日志默认不记录请求和响应正文；开启 `CAG_DEBUG_BODY` 前请评估隐私风险。
-- Codex 使用 `read-only` sandbox 和 `approvalPolicy: never`；网关返回工具调用，不代替客户端执行。
+- Codex 会话沿用本机 Codex 的沙箱和审批配置；网关返回客户端工具调用，不代替客户端执行。
 - 工作目录必须是已存在的本机绝对路径。请只连接你信任的本地客户端。
 - 请遵守 Kimi、OpenAI 以及所使用订阅的服务条款。
 
@@ -418,7 +418,7 @@ This prevents nondeterministic responses from being reused incorrectly.
 - `.env`, JSON credentials, logs, cache files, and Python caches are ignored by Git.
 - Credentials remain on the local machine and are never copied into the repository.
 - Request and response bodies are not logged by default. Review privacy implications before enabling `CAG_DEBUG_BODY`.
-- Codex App Server uses a `read-only` sandbox and `approvalPolicy: never`; the gateway returns client tool calls instead of executing them.
+- Codex App Server inherits the local Codex sandbox and approval settings; the gateway returns client tool calls instead of executing them.
 - Working directories must be existing absolute local paths. Only connect trusted local clients.
 - Use the project in accordance with the terms of Kimi, OpenAI, and your subscription.
 
