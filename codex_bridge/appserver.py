@@ -10,8 +10,9 @@ from .protocol import AppServerError, await_turn as _await_turn
 
 
 class AppServerPool:
-    def __init__(self, size):
+    def __init__(self, size, max_turns=12):
         self.size = max(1, size)
+        self.max_turns = max(1, max_turns)
         self._available = queue.LifoQueue()
         self._all = []
         self._lock = threading.Lock()
@@ -25,7 +26,9 @@ class AppServerPool:
         )
         healthy = True
         try:
-            return process.run(*args, **kwargs)
+            result = process.run(*args, **kwargs)
+            process.completed_turns += 1
+            return result
         except Exception:
             healthy = False
             raise
@@ -101,7 +104,8 @@ class AppServerPool:
         return self._acquire(timeout)
 
     def _release(self, process, healthy):
-        if healthy and (process.alive or process.proc is None):
+        if (healthy and process.completed_turns < self.max_turns
+                and (process.alive or process.proc is None)):
             self._available.put(process)
         else:
             self._discard(process)
@@ -122,7 +126,8 @@ def _pool():
     with _POOL_LOCK:
         if _POOL is None:
             raw = os.environ.get("CAG_CODEX_POOL_SIZE", "2")
-            _POOL = AppServerPool(int(raw))
+            max_turns = os.environ.get("CAG_CODEX_MAX_TURNS", "12")
+            _POOL = AppServerPool(int(raw), int(max_turns))
         return _POOL
 
 

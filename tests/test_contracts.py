@@ -1,6 +1,10 @@
 """Public protocol and provider lifecycle contracts."""
 
 import os
+import signal
+import subprocess
+import sys
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -10,7 +14,7 @@ os.environ.setdefault("CAG_DEVICE_ID_PATH", "/tmp/cag-contract-device")
 os.environ.setdefault("CAG_LOG_DIR", "/tmp/cag-contract-logs")
 
 from codex_bridge.appserver import AppServerPool
-from codex_bridge.process import _child_environment
+from codex_bridge.process import AppServerProcess, _child_environment
 from codex_bridge.protocol import start_thread
 from gateway.compat import chat_to_response, responses_to_chat
 from gateway.config import GatewayConfig
@@ -74,6 +78,7 @@ class FakeProcess:
     def __init__(self):
         self.proc = None
         self._alive = False
+        self.completed_turns = 0
 
     @property
     def alive(self):
@@ -122,6 +127,54 @@ class ProcessPoolTests(unittest.TestCase):
             self.assertEqual(FakeProcess.starts, 1)
             self.assertEqual(pool.stats()["processes"], 1)
             pool.close()
+
+    def test_process_rotates_after_request_limit(self):
+        FakeProcess.starts = 0
+        with patch("codex_bridge.appserver.AppServerProcess", FakeProcess):
+            pool = AppServerPool(1, max_turns=2)
+            self.assertEqual(pool.run("one", "/tmp"), ("one", "/tmp"))
+            self.assertEqual(pool.run("two", "/tmp"), ("two", "/tmp"))
+            self.assertEqual(pool.stats()["processes"], 0)
+            self.assertEqual(pool.run("three", "/tmp"), ("three", "/tmp"))
+            self.assertEqual(FakeProcess.starts, 2)
+            pool.close()
+
+    @unittest.skipUnless(os.name == "posix", "requires process groups")
+    def test_close_stops_child_process_group(self):
+        script = (
+            "import subprocess, sys, time; "
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(60)'], start_new_session=True); "
+            "print(child.pid, flush=True); time.sleep(60)"
+        )
+        parent = subprocess.Popen(
+            [sys.executable, "-c", script], stdout=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+        child_pid = int(parent.stdout.readline().strip())
+        process = AppServerProcess()
+        process.proc = parent
+        process._process_group = parent.pid
+        try:
+            process.close()
+            self.assertIsNotNone(parent.poll())
+            for _ in range(20):
+                state = subprocess.run(
+                    ["ps", "-p", str(child_pid), "-o", "stat="],
+                    capture_output=True, text=True, check=False,
+                ).stdout.strip()
+                if not state or state.startswith("Z"):
+                    break
+                time.sleep(0.05)
+            self.assertTrue(not state or state.startswith("Z"), state)
+        finally:
+            try:
+                os.killpg(parent.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            if parent.poll() is None:
+                parent.kill()
+            parent.wait()
 
 
 class ProviderHealthTests(unittest.TestCase):

@@ -164,6 +164,7 @@ launchctl print gui/$(id -u)/io.github.code-agent-gateway
 | `CAG_HTTP_WORKERS` | `64` | HTTP 工作线程数 |
 | `CAG_HTTP_PENDING` | `128` | HTTP 待处理队列上限 |
 | `CAG_CODEX_POOL_SIZE` | `2` | 可复用 Codex 进程数 |
+| `CAG_CODEX_MAX_TURNS` | `12` | 每个 Codex 进程处理的请求上限；达到后回收其子进程树 |
 | `CAG_CODEX_QUEUE_TIMEOUT` | `30` | Codex 进程池等待时间 |
 | `CAG_CODEX_PROXY` | 空 | 仅供 Codex 子进程使用的代理，例如 `http://127.0.0.1:7897` |
 | `CAG_UPSTREAM_TIMEOUT` | `600` | 单次上游请超时 |
@@ -373,6 +374,7 @@ Configuration is loaded from `.env` or process environment variables. See
 | `CAG_HTTP_WORKERS` | `64` | Bounded HTTP workers |
 | `CAG_HTTP_PENDING` | `128` | Pending HTTP queue size |
 | `CAG_CODEX_POOL_SIZE` | `2` | Reusable Codex processes |
+| `CAG_CODEX_MAX_TURNS` | `12` | Requests per Codex process before its process tree is retired |
 | `CAG_CODEX_QUEUE_TIMEOUT` | `30` | Codex pool wait timeout |
 | `CAG_CODEX_PROXY` | empty | Proxy used only by Codex children, for example `http://127.0.0.1:7897` |
 | `CAG_UPSTREAM_TIMEOUT` | `600` | Per-request upstream timeout |
